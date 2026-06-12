@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
+import { WebglAddon } from 'xterm-addon-webgl';
 import 'xterm/css/xterm.css';
 
 const TERMINAL_THEME = {
@@ -54,7 +55,8 @@ export default function TerminalPane({
   // Gutter state — kept in refs to avoid excessive re-renders, flushed to state on scroll/data
   const lineTimestampsRef = useRef(new Map()); // bufferLine -> "HH:MM:SS"
   const trackedLinesRef = useRef(0);           // how many lines we've assigned timestamps
-  const [gutterViewport, setGutterViewport] = useState({ y: 0, rows: 24, total: 0 });
+  const [gutterViewport, setGutterViewport] = useState({ y: 0, rows: 24, total: 0, cellHeight: fontSize * LINE_HEIGHT });
+  const cellHeightRef = useRef(fontSize * LINE_HEIGHT);
 
   const dataCleanupRef = useRef(null);
   const exitCleanupRef = useRef(null);
@@ -108,12 +110,10 @@ export default function TerminalPane({
       fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", "Fira Code", "SF Mono", "Menlo", "Consolas", "Courier New", monospace',
       fontSize,
       lineHeight: LINE_HEIGHT,
-      letterSpacing: 0.3,
       theme: TERMINAL_THEME,
       cursorBlink: true,
       cursorStyle: 'bar',
       scrollback: 10000,
-      allowTransparency: true,
       macOptionIsMeta: true,
       macOptionClickForcesSelection: false,
       rightClickSelectsWord: false,
@@ -126,10 +126,31 @@ export default function TerminalPane({
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    // Use WebGL renderer for correct wrapped-line rendering.
+    // The default canvas renderer has a known dirty-row tracking bug where
+    // continuation rows of wrapped lines are not repainted, appearing blank.
+    // Fall back to canvas silently if WebGL is unavailable.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch (_) {}
+
     // ── Gutter sync ──
+    // Read the actual cell height from xterm's internal renderer so the gutter
+    // stays pixel-perfectly aligned regardless of font metrics or DPI.
+    const readCellHeight = () => {
+      const ch = term._core?._renderService?._renderer?.value?._dimensions?.device?.cell?.height
+               ?? term._core?._renderService?.dimensions?.device?.cell?.height;
+      if (ch && ch > 0) {
+        const css = ch / (window.devicePixelRatio || 1);
+        cellHeightRef.current = css;
+      }
+    };
     const syncGutter = () => {
+      readCellHeight();
       const buf = term.buffer.active;
-      setGutterViewport({ y: buf.viewportY, rows: term.rows, total: buf.length });
+      setGutterViewport({ y: buf.viewportY, rows: term.rows, total: buf.length, cellHeight: cellHeightRef.current });
     };
     term.onScroll(syncGutter);
     term.onResize(syncGutter);
@@ -335,8 +356,7 @@ export default function TerminalPane({
   reconnectRef.current = (sessionConfig || quickConnect) ? handleReconnect : null;
 
   // ── Gutter render ─────────────────────────────────────────────────────────
-  const cellHeight = fontSize * LINE_HEIGHT;
-  const { y: viewportY, rows, total } = gutterViewport;
+  const { y: viewportY, rows, total, cellHeight } = gutterViewport;
 
   const startLine = Math.max(0, viewportY - GUTTER_OVERSCAN);
   const endLine = Math.min(total - 1, viewportY + rows + GUTTER_OVERSCAN);

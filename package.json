@@ -47,16 +47,46 @@
       "gatekeeperAssess": false,
       "identity": null,
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "dmg", "arch": ["x64"] },
-        { "target": "zip", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "signAndEditExecutable": false
     },
@@ -68,13 +98,19 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     }
   },
   "dependencies": {
     "electron-store": "^8.1.0",
     "node-pty": "^1.0.0",
+    "xterm-addon-webgl": "^0.16.0",
     "zmodem.js": "^0.1.10"
   },
   "devDependencies": {

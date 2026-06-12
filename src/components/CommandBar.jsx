@@ -1,5 +1,92 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 
+// ── Command Search Palette ────────────────────────────────────────────────────
+function CommandPalette({ commands, onSend, onClose }) {
+  const [query, setQuery] = useState('');
+  const [activeIdx, setActiveIdx] = useState(0);
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return commands;
+    return commands.filter(
+      (c) =>
+        c.label?.toLowerCase().includes(q) ||
+        c.command?.toLowerCase().includes(q) ||
+        c.group?.toLowerCase().includes(q)
+    );
+  }, [commands, query]);
+
+  // Reset selection when filter changes
+  useEffect(() => setActiveIdx(0), [filtered]);
+
+  // Focus input on open
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  // Scroll active item into view
+  useEffect(() => {
+    const el = listRef.current?.children[activeIdx];
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [activeIdx]);
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, filtered.length - 1)); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filtered[activeIdx]) { onSend(filtered[activeIdx]); onClose(); }
+      return;
+    }
+  };
+
+  return (
+    <div className="cmd-palette-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="cmd-palette">
+        <div className="cmd-palette-search">
+          <span className="cmd-palette-icon">⌘</span>
+          <input
+            ref={inputRef}
+            className="cmd-palette-input"
+            placeholder="搜索命令…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <kbd className="cmd-palette-esc" onClick={onClose}>ESC</kbd>
+        </div>
+
+        <div ref={listRef} className="cmd-palette-list">
+          {filtered.length === 0 && (
+            <div className="cmd-palette-empty">无匹配命令</div>
+          )}
+          {filtered.map((cmd, i) => (
+            <div
+              key={cmd.id}
+              className={`cmd-palette-item ${i === activeIdx ? 'active' : ''}`}
+              onMouseEnter={() => setActiveIdx(i)}
+              onMouseDown={(e) => { e.preventDefault(); onSend(cmd); onClose(); }}
+            >
+              {cmd.color && <span className="cmd-palette-dot" style={{ background: cmd.color }} />}
+              <span className="cmd-palette-label">{cmd.label}</span>
+              <span className="cmd-palette-cmd">{cmd.command}</span>
+              <span className="cmd-palette-group">{cmd.group || 'Default'}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="cmd-palette-footer">
+          <span><kbd>↑↓</kbd> 导航</span>
+          <span><kbd>↵</kbd> 发送</span>
+          <span><kbd>ESC</kbd> 关闭</span>
+          <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>{filtered.length} 条命令</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Command Dialog (Add / Edit) ──────────────────────────────────────────────
 function CommandDialog({ cmd, groups, onSave, onClose }) {
   const [form, setForm] = useState({
@@ -105,7 +192,8 @@ export default function CommandBar({ onSendCommand }) {
   const [activeGroup, setActiveGroup] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingCmd, setEditingCmd] = useState(null);
-  const [contextMenu, setContextMenu] = useState(null); // { x, y, cmd }
+  const [contextMenu, setContextMenu] = useState(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Load commands on mount
   useEffect(() => {
@@ -113,6 +201,19 @@ export default function CommandBar({ onSendCommand }) {
     window.electronAPI.commands.getAll().then((cmds) => {
       setCommands(cmds || []);
     });
+  }, []);
+
+  // Global shortcut: Ctrl+/ (or Cmd+/) opens command palette
+  useEffect(() => {
+    const handler = (e) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && e.key === '/') {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', handler, true); // capture phase — fires before xterm
+    return () => window.removeEventListener('keydown', handler, true);
   }, []);
 
   // All unique groups
@@ -147,7 +248,6 @@ export default function CommandBar({ onSendCommand }) {
     });
     setDialogOpen(false);
     setEditingCmd(null);
-    // Switch to the saved command's group
     setActiveGroup(saved.group?.trim() || 'Default');
   }, []);
 
@@ -157,9 +257,8 @@ export default function CommandBar({ onSendCommand }) {
     setCommands((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
-  const handleClick = useCallback((cmd) => {
+  const handleSend = useCallback((cmd) => {
     if (!onSendCommand) return;
-    // Send command + Enter to the active terminal
     onSendCommand(cmd.command + '\r');
   }, [onSendCommand]);
 
@@ -172,21 +271,21 @@ export default function CommandBar({ onSendCommand }) {
   return (
     <>
       <div className="command-bar">
-        {/* Group tabs */}
+        {/* Group dropdown */}
         {groups.length > 0 && (
-          <div className="cmd-groups">
-            {groups.map((g) => (
-              <button
-                key={g}
-                className={`cmd-group-tab ${currentGroup === g ? 'active' : ''}`}
-                onClick={() => setActiveGroup(g)}
-              >
-                {g}
-                <span className="cmd-group-count">
-                  {commands.filter((c) => (c.group?.trim() || 'Default') === g).length}
-                </span>
-              </button>
-            ))}
+          <div className="cmd-group-select-wrap">
+            <select
+              className="cmd-group-select"
+              value={currentGroup}
+              onChange={(e) => setActiveGroup(e.target.value)}
+            >
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g} ({commands.filter((c) => (c.group?.trim() || 'Default') === g).length})
+                </option>
+              ))}
+            </select>
+            <span className="cmd-group-select-arrow">▾</span>
           </div>
         )}
 
@@ -197,7 +296,7 @@ export default function CommandBar({ onSendCommand }) {
               key={cmd.id}
               className="cmd-btn"
               style={cmd.color ? { '--cmd-color': cmd.color, borderColor: cmd.color } : {}}
-              onClick={() => handleClick(cmd)}
+              onClick={() => handleSend(cmd)}
               onContextMenu={(e) => handleContextMenu(e, cmd)}
               title={cmd.command}
             >
@@ -213,15 +312,34 @@ export default function CommandBar({ onSendCommand }) {
           )}
         </div>
 
-        {/* Add button */}
-        <button
-          className="cmd-add-btn"
-          onClick={() => { setEditingCmd(null); setDialogOpen(true); }}
-          title="添加常用命令"
-        >
-          +
-        </button>
+        {/* Search shortcut hint + Add button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0, paddingRight: 4 }}>
+          <button
+            className="cmd-palette-trigger"
+            onClick={() => setPaletteOpen(true)}
+            title="搜索命令 (Ctrl+/)"
+          >
+            <span style={{ fontSize: 12 }}>⌘</span>
+            <kbd>/</kbd>
+          </button>
+          <button
+            className="cmd-add-btn"
+            onClick={() => { setEditingCmd(null); setDialogOpen(true); }}
+            title="添加常用命令"
+          >
+            +
+          </button>
+        </div>
       </div>
+
+      {/* Command Palette */}
+      {paletteOpen && (
+        <CommandPalette
+          commands={commands}
+          onSend={handleSend}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
       {/* Dialog */}
       {dialogOpen && (

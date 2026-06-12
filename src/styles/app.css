@@ -1050,54 +1050,196 @@ html, body, #root {
 }
 
 /* Group tabs on the left */
-.cmd-groups {
-  display: flex;
-  align-items: stretch;
-  height: 100%;
-  border-right: 1px solid var(--border);
-  flex-shrink: 0;
-  max-width: 280px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.cmd-groups::-webkit-scrollbar { display: none; }
-
-.cmd-group-tab {
+/* ── Group dropdown ── */
+.cmd-group-select-wrap {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 10px;
   height: 100%;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  background: none;
-  border: none;
   border-right: 1px solid var(--border);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color 0.1s, background 0.1s;
   flex-shrink: 0;
 }
-.cmd-group-tab:last-child { border-right: none; }
-.cmd-group-tab:hover { color: var(--text-secondary); background: var(--bg-hover); }
-.cmd-group-tab.active {
+.cmd-group-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 100%;
+  padding: 0 28px 0 10px;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text-accent);
   background: var(--bg-tertiary);
-  border-bottom: 2px solid var(--accent);
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 80px;
+  max-width: 160px;
+  outline: none;
+}
+.cmd-group-select:focus { background: var(--bg-hover); }
+.cmd-group-select-arrow {
+  position: absolute;
+  right: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
 }
 
-.cmd-group-count {
-  font-size: 9px;
+/* ── Palette trigger button ── */
+.cmd-palette-trigger {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 7px;
+  height: 22px;
+  font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-tertiary);
-  padding: 1px 4px;
-  border-radius: 8px;
-  line-height: 1.4;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.1s, background 0.1s;
 }
-.cmd-group-tab.active .cmd-group-count {
-  background: var(--accent-dim);
-  color: var(--text-accent);
+.cmd-palette-trigger kbd {
+  font-size: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  padding: 0 3px;
+  font-family: inherit;
+  color: var(--text-muted);
+}
+.cmd-palette-trigger:hover { color: var(--text-accent); background: var(--bg-hover); }
+
+/* ── Command Palette overlay ── */
+.cmd-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 80px;
+  animation: fadeIn 0.12s ease-out;
+}
+.cmd-palette {
+  width: 560px;
+  max-width: calc(100vw - 40px);
+  background: var(--bg-modal);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.7);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 420px;
+}
+.cmd-palette-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  height: 46px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.cmd-palette-icon {
+  font-size: 16px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.cmd-palette-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  color: var(--text-primary);
+  caret-color: var(--accent);
+}
+.cmd-palette-input::placeholder { color: var(--text-muted); }
+.cmd-palette-esc {
+  font-size: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-family: inherit;
+}
+.cmd-palette-list {
+  overflow-y: auto;
+  flex: 1;
+}
+.cmd-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.08s;
+  user-select: none;
+}
+.cmd-palette-item.active { background: var(--bg-hover); }
+.cmd-palette-item:hover  { background: var(--bg-hover); }
+.cmd-palette-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.cmd-palette-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 80px;
+}
+.cmd-palette-cmd {
+  font-size: 11px;
+  font-family: "JetBrains Mono", "SF Mono", monospace;
+  color: var(--text-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmd-palette-group {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.cmd-palette-empty {
+  padding: 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.cmd-palette-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.cmd-palette-footer kbd {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-family: inherit;
 }
 
 /* Command buttons list */

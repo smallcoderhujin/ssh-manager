@@ -2,19 +2,23 @@ import React, { useState, useMemo } from 'react';
 
 export default function Sidebar({ sessions, onConnect, onAdd, onEdit, onDelete, onDuplicate, onImport, onExportSessions, onImportSessions }) {
   const [search, setSearch] = useState('');
-  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
+  // All groups are collapsed by default; track which ones the user has opened
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return sessions;
-    return sessions.filter((s) => {
-      return (
-        s.label?.toLowerCase().includes(q) ||
-        s.host?.toLowerCase().includes(q) ||
-        s.user?.toLowerCase().includes(q) ||
-        s.group?.toLowerCase().includes(q)
-      );
-    });
+    const result = sessions.filter((s) =>
+      s.label?.toLowerCase().includes(q) ||
+      s.host?.toLowerCase().includes(q) ||
+      s.user?.toLowerCase().includes(q) ||
+      s.group?.toLowerCase().includes(q)
+    );
+    // Auto-expand all groups that have matching sessions when searching
+    if (result.length > 0) {
+      setExpandedGroups(new Set(result.map((s) => s.group?.trim() || 'Default')));
+    }
+    return result;
   }, [sessions, search]);
 
   const grouped = useMemo(() => {
@@ -24,19 +28,27 @@ export default function Sidebar({ sessions, onConnect, onAdd, onEdit, onDelete, 
       if (!map.has(g)) map.set(g, []);
       map.get(g).push(s);
     }
-    // Sort: Default first, then alphabetically
+    // Sort groups: Default first, then alphabetically
+    // Sort sessions within each group alphabetically by label/host
     const sorted = new Map(
-      [...map.entries()].sort(([a], [b]) => {
-        if (a === 'Default') return -1;
-        if (b === 'Default') return 1;
-        return a.localeCompare(b);
-      })
+      [...map.entries()]
+        .sort(([a], [b]) => {
+          if (a === 'Default') return -1;
+          if (b === 'Default') return 1;
+          return a.localeCompare(b);
+        })
+        .map(([g, items]) => [
+          g,
+          [...items].sort((a, b) =>
+            (a.label || a.host || '').localeCompare(b.label || b.host || '')
+          ),
+        ])
     );
     return sorted;
   }, [filtered]);
 
   const toggleGroup = (group) => {
-    setCollapsedGroups((prev) => {
+    setExpandedGroups((prev) => {
       const next = new Set(prev);
       if (next.has(group)) next.delete(group);
       else next.add(group);
@@ -113,7 +125,7 @@ export default function Sidebar({ sessions, onConnect, onAdd, onEdit, onDelete, 
           <div key={group} className="session-group">
             <div className="session-group-header" onClick={() => toggleGroup(group)}>
               <span
-                className={`session-group-toggle ${collapsedGroups.has(group) ? 'collapsed' : ''}`}
+                className={`session-group-toggle ${expandedGroups.has(group) ? '' : 'collapsed'}`}
               >
                 ▾
               </span>
@@ -123,7 +135,7 @@ export default function Sidebar({ sessions, onConnect, onAdd, onEdit, onDelete, 
               </span>
             </div>
 
-            {!collapsedGroups.has(group) &&
+            {expandedGroups.has(group) &&
               items.map((session) => (
                 <SessionItem
                   key={session.id}
