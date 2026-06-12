@@ -713,7 +713,7 @@ html, body, #root {
 .terminal-pane {
   flex: 1;
   overflow: hidden;
-  padding: 4px;
+  padding: 0;
 }
 
 .terminal-pane .xterm {

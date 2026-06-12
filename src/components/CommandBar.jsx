@@ -178,8 +178,16 @@ function ContextMenu({ x, y, cmd, onEdit, onDelete, onClose }) {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  // Flip upward if too close to the bottom of the viewport
+  const MENU_HEIGHT = 72; // approx height of 2 items
+  const flipped = y + MENU_HEIGHT > window.innerHeight - 8;
+  const style = {
+    left: Math.min(x, window.innerWidth - 140),
+    ...(flipped ? { bottom: window.innerHeight - y } : { top: y }),
+  };
+
   return (
-    <div ref={ref} className="cmd-context-menu" style={{ left: x, top: y }}>
+    <div ref={ref} className="cmd-context-menu" style={style}>
       <div className="cmd-context-item" onClick={() => { onEdit(cmd); onClose(); }}>✎ 编辑</div>
       <div className="cmd-context-item danger" onClick={() => { onDelete(cmd.id); onClose(); }}>✕ 删除</div>
     </div>
@@ -265,7 +273,7 @@ export default function CommandBar({ onSendCommand }) {
   const handleContextMenu = useCallback((e, cmd) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY - 4, cmd });
+    setContextMenu({ x: e.clientX, y: e.clientY, cmd });
   }, []);
 
   return (
