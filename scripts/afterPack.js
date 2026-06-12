@@ -17,10 +17,20 @@ exports.default = async function afterPack({ appOutDir, packager }) {
     // Remove quarantine / extended attributes
     execSync(`xattr -cr "${appPath}"`, { stdio: 'pipe' });
 
-    // Sign all nested .node native modules first (node-pty etc.)
+    // Fix execute permissions for node-pty's spawn-helper binaries.
+    // electron-builder copies them with 644 (no execute bit), causing posix_spawnp to fail.
     try {
       execSync(
-        `find "${appPath}" -name "*.node" | while read f; do codesign --force --sign - "$f"; done`,
+        `find "${appPath}" -name "spawn-helper" -exec chmod +x {} \\;`,
+        { stdio: 'pipe', shell: true }
+      );
+      console.log('[afterPack] Fixed spawn-helper permissions.');
+    } catch (_) {}
+
+    // Sign all nested .node native modules and spawn-helper binaries
+    try {
+      execSync(
+        `find "${appPath}" \\( -name "*.node" -o -name "spawn-helper" \\) | while read f; do codesign --force --sign - "$f"; done`,
         { stdio: 'pipe', shell: true }
       );
     } catch (_) {}

@@ -111,6 +111,7 @@ function buildSshArgs(session) {
   args.push('-o', 'BatchMode=no');
   args.push('-o', 'PasswordAuthentication=yes');
   args.push('-o', 'PreferredAuthentications=keyboard-interactive,password,publickey');
+  args.push('-o', 'ConnectTimeout=10');
 
   if (session.port && session.port !== 22 && session.port !== '22') {
     args.push('-p', String(session.port));
@@ -162,7 +163,7 @@ function setupPasswordAutofill(ptyProcess, password) {
     }
   });
 
-  return dispose;
+  return () => dispose.dispose();
 }
 
 // IPC: terminal:create
@@ -185,6 +186,7 @@ ipcMain.handle('terminal:create', (event, options) => {
         '-o', 'BatchMode=no',
         '-o', 'PasswordAuthentication=yes',
         '-o', 'PreferredAuthentications=keyboard-interactive,password,publickey',
+        '-o', 'ConnectTimeout=10',
       ];
       if (port) spawnArgs.push('-p', port);
       spawnArgs.push(`${user}@${host}`);
@@ -194,6 +196,7 @@ ipcMain.handle('terminal:create', (event, options) => {
         '-o', 'BatchMode=no',
         '-o', 'PasswordAuthentication=yes',
         '-o', 'PreferredAuthentications=keyboard-interactive,password,publickey',
+        '-o', 'ConnectTimeout=10',
         options.quickConnect,
       ];
     }
@@ -220,14 +223,33 @@ ipcMain.handle('terminal:create', (event, options) => {
 
   let ptyProcess;
   try {
+    const home = os.homedir();
+    const userInfo = os.userInfo();
+    // Packaged Electron apps on macOS/Windows can launch with a sparse process.env
+    // (missing HOME, PATH, SHELL etc.), causing posix_spawnp / CreateProcess to fail.
+    // Set platform-specific fallbacks first, then let real process.env override them.
+    const envFallbacks = isWin ? {
+      USERPROFILE: home,
+      HOMEDRIVE: home.split(path.sep)[0] || 'C:',
+      HOMEPATH: home.slice(home.split(path.sep)[0].length),
+      USERNAME: userInfo.username,
+      Path: 'C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem',
+    } : {
+      HOME: home,
+      USER: userInfo.username,
+      LOGNAME: userInfo.username,
+      SHELL: userInfo.shell || '/bin/zsh',
+      PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin',
+    };
     ptyProcess = pty.spawn(spawnCommand, spawnArgs, {
       name: 'xterm-256color',
       cols,
       rows,
-      cwd: os.homedir(),
+      cwd: home,
       // binary encoding so Zmodem data passes through correctly
       encoding: null,
       env: {
+        ...envFallbacks,
         ...process.env,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor',

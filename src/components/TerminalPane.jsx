@@ -58,8 +58,12 @@ export default function TerminalPane({
 
   const dataCleanupRef = useRef(null);
   const exitCleanupRef = useRef(null);
+  const reconnectRef = useRef(null);
+  // Mirrors `status` state synchronously so onData closures can read it without stale captures
+  const statusRef = useRef('connecting');
 
   const updateStatus = useCallback((s) => {
+    statusRef.current = s;
     setStatus(s);
     onStatusChange?.(s);
   }, [onStatusChange]);
@@ -216,12 +220,18 @@ export default function TerminalPane({
           setExitInfo({ exitCode, signal });
           term.writeln('');
           term.writeln(`\x1b[33m[Process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m`);
+          if (sessionConfig || quickConnect) {
+            term.writeln('\x1b[2m[Press Enter to reconnect]\x1b[0m');
+          }
         }
       });
 
       term.onData((data) => {
-        if (terminalIdRef.current !== null)
+        if (statusRef.current === 'disconnected') {
+          if (data === '\r' && reconnectRef.current) reconnectRef.current();
+        } else if (terminalIdRef.current !== null) {
           window.electronAPI.terminal.write(terminalIdRef.current, data);
+        }
       });
 
       term.onResize(({ cols, rows }) => {
@@ -297,9 +307,17 @@ export default function TerminalPane({
       setGutterViewport({ y: buf.viewportY, rows: termRef.current.rows, total: buf.length });
     };
 
-    dataCleanupRef.current = window.electronAPI.terminal.onData(({ id, data }) => {
+    const dataUnsub = window.electronAPI.terminal.onData(({ id, data }) => {
       if (id === result.id) termRef.current?.write(data, trackTimestamps);
     });
+    const zmodemUnsub = window.electronAPI.terminal.onZmodem((msg) => {
+      if (msg.id !== result.id) return;
+      if (msg.type === 'start') setZmodem({ direction: msg.direction, name: '', received: 0, total: 0, done: false });
+      else if (msg.type === 'progress') setZmodem((z) => z ? { ...z, name: msg.name, received: msg.received, total: msg.total } : z);
+      else if (msg.type === 'done') setZmodem((z) => z ? { ...z, name: msg.name, received: msg.size, total: msg.size, done: true, savedPath: msg.savedPath } : z);
+      else if (msg.type === 'end') setTimeout(() => setZmodem(null), 2000);
+    });
+    dataCleanupRef.current = () => { dataUnsub(); zmodemUnsub(); };
 
     exitCleanupRef.current = window.electronAPI.terminal.onExit(({ id, exitCode, signal }) => {
       if (id === result.id) {
@@ -307,10 +325,14 @@ export default function TerminalPane({
         updateStatus('disconnected');
         setExitInfo({ exitCode, signal });
         termRef.current?.writeln('');
-        termRef.current?.writeln(`\x1b[33m[Process exited with code ${exitCode}]\x1b[0m`);
+        termRef.current?.writeln(`\x1b[33m[Process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m`);
+        if (sessionConfig || quickConnect) {
+          termRef.current?.writeln('\x1b[2m[Press Enter to reconnect]\x1b[0m');
+        }
       }
     });
   }, [sessionConfig, quickConnect, password]);
+  reconnectRef.current = (sessionConfig || quickConnect) ? handleReconnect : null;
 
   // ── Gutter render ─────────────────────────────────────────────────────────
   const cellHeight = fontSize * LINE_HEIGHT;
