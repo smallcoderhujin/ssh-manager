@@ -17,6 +17,13 @@ exports.default = async function afterPack({ appOutDir, packager }) {
     // Remove quarantine / extended attributes
     execSync(`xattr -cr "${appPath}"`, { stdio: 'pipe' });
 
+    // Fix execute permission for switch-ime helper
+    try {
+      const switchIme = path.join(appPath, 'Contents', 'Resources', 'switch-ime');
+      execSync(`chmod +x "${switchIme}"`, { stdio: 'pipe' });
+      execSync(`codesign --force --sign - "${switchIme}"`, { stdio: 'pipe' });
+    } catch (_) {}
+
     // Fix execute permissions for node-pty's spawn-helper binaries.
     // electron-builder copies them with 644 (no execute bit), causing posix_spawnp to fail.
     try {

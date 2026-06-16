@@ -48,6 +48,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (key, value) => ipcRenderer.invoke('settings:set', key, value),
   },
 
+  // Last-open tabs persistence
+  tabs: {
+    save: (tabs) => ipcRenderer.invoke('tabs:save', tabs),
+    restore: () => ipcRenderer.invoke('tabs:restore'),
+  },
+
   // Clipboard (bypass navigator.clipboard restrictions)
   clipboard: {
     writeText: (text) => clipboard.writeText(text),

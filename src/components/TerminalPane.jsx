@@ -172,18 +172,32 @@ export default function TerminalPane({
       if (sel && window.electronAPI) window.electronAPI.clipboard.writeText(sel);
     });
 
-    // Right-click → paste
+    // Hint to OS/browser that this is a plain-text ASCII input area.
+    // Does NOT block IME — the OS-level switch is handled in main.js on window focus.
+    const setupImeHint = () => {
+      const ta = term.textarea;
+      if (!ta) return;
+      ta.setAttribute('lang', 'en');
+      ta.setAttribute('autocomplete', 'off');
+      ta.setAttribute('autocorrect', 'off');
+      ta.setAttribute('autocapitalize', 'off');
+      ta.setAttribute('spellcheck', 'false');
+    };
+    if (term.textarea) setupImeHint();
+    else requestAnimationFrame(setupImeHint);
+
+    // Right-click → paste + scroll to bottom
     const el = containerRef.current;
     const onContextMenu = (e) => {
       e.preventDefault();
       if (!window.electronAPI) return;
       const text = window.electronAPI.clipboard.readText();
-      if (text && terminalIdRef.current !== null)
+      if (text && terminalIdRef.current !== null) {
         window.electronAPI.terminal.write(terminalIdRef.current, text);
+        term.scrollToBottom();
+      }
     };
     el.addEventListener('contextmenu', onContextMenu);
-
-    setTimeout(() => { try { fitAddon.fit(); } catch (_) {} }, 50);
 
     // ── PTY session ──
     const initTerminal = async () => {
@@ -204,6 +218,8 @@ export default function TerminalPane({
       }
 
       terminalIdRef.current = result.id;
+      // Re-sync dimensions: fit() may have changed cols/rows between create() call and response
+      window.electronAPI.terminal.resize(result.id, term.cols, term.rows);
       updateStatus('connected');
       // Register sendCommand fn so CommandBar can write to this terminal
       onReady?.((text) => {
@@ -252,6 +268,8 @@ export default function TerminalPane({
           if (data === '\r' && reconnectRef.current) reconnectRef.current();
         } else if (terminalIdRef.current !== null) {
           window.electronAPI.terminal.write(terminalIdRef.current, data);
+          // Scroll to bottom on Enter so output is always visible
+          if (data === '\r') term.scrollToBottom();
         }
       });
 
@@ -261,9 +279,25 @@ export default function TerminalPane({
       });
     };
 
-    initTerminal();
+    // Wait until the container has a real layout size before creating the PTY.
+    // requestAnimationFrame is not enough in Electron — use ResizeObserver so we
+    // only proceed once clientWidth > 0 (real layout dimensions are available).
+    // This prevents the PTY from being told 80 cols (xterm default) while the
+    // terminal container is actually wider.
+    let started = false;
+    const startObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (w > 0 && !started) {
+        started = true;
+        startObserver.disconnect();
+        try { fitAddon.fit(); } catch (_) {}
+        initTerminal();
+      }
+    });
+    startObserver.observe(containerRef.current);
 
     return () => {
+      startObserver.disconnect();
       el.removeEventListener('contextmenu', onContextMenu);
       if (dataCleanupRef.current) dataCleanupRef.current();
       if (exitCleanupRef.current) exitCleanupRef.current();

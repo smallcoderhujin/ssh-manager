@@ -40,6 +40,9 @@
     "extraMetadata": {
       "main": "electron/main.js"
     },
+    "extraResources": [
+      { "from": "assets/switch-ime", "to": "switch-ime", "filter": ["**/*"] }
+    ],
     "afterPack": "scripts/afterPack.js",
     "mac": {
       "category": "public.app-category.developer-tools",

@@ -526,6 +526,10 @@ ipcMain.handle('sessions:import', async (event) => {
 ipcMain.handle('settings:get', (event, key) => store.get(`settings.${key}`));
 ipcMain.handle('settings:set', (event, key, value) => { store.set(`settings.${key}`, value); });
 
+// IPC: last-open tabs (save before quit, restore on launch)
+ipcMain.handle('tabs:save', (event, tabs) => { store.set('lastTabs', tabs); });
+ipcMain.handle('tabs:restore', () => store.get('lastTabs', []));
+
 // IPC: commands (quick command bar)
 ipcMain.handle('commands:getAll', () => store.get('commands', []));
 ipcMain.handle('commands:save', (event, cmd) => {
@@ -672,6 +676,19 @@ function finalizeSession(s) {
 // App lifecycle
 app.whenReady().then(() => {
   createWindow();
+
+  // macOS: when the app window gains focus, switch to the first ASCII-capable
+  // keyboard input source (e.g. ABC / US English) using a bundled Swift helper
+  // that calls TISSelectInputSource directly — no Accessibility permission needed.
+  if (isMac) {
+    const { execFile } = require('child_process');
+    const switchImePath = app.isPackaged
+      ? path.join(process.resourcesPath, 'switch-ime')
+      : path.join(__dirname, '..', 'assets', 'switch-ime');
+    app.on('browser-window-focus', () => {
+      execFile(switchImePath, { timeout: 800 }, () => {});
+    });
+  }
 
   // macOS: re-create window if dock icon clicked
   app.on('activate', () => {

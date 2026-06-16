@@ -33,12 +33,37 @@ export default function App() {
   // Map of tabId -> sendCommand function registered by each TerminalPane
   const terminalSendRefs = useRef({});
 
-  // Load sessions on mount
+  // Load sessions + restore last open tabs on mount
   useEffect(() => {
-    if (window.electronAPI) {
-      window.electronAPI.sessions.getAll().then(setSessions);
-    }
+    if (!window.electronAPI) return;
+    window.electronAPI.sessions.getAll().then(setSessions);
+    window.electronAPI.tabs.restore().then((savedTabs) => {
+      if (!savedTabs || savedTabs.length === 0) return;
+      const restored = savedTabs.map((t) => createTab({
+        title: t.title,
+        sessionConfig: t.sessionConfig || null,
+        quickConnect: t.quickConnect || null,
+        password: t.password || null,
+      }));
+      setTabs(restored);
+      setActiveTabId(restored[0].id);
+    });
   }, []);
+
+  // Persist open tabs on every change so the store is always up-to-date.
+  // win.destroy() in the main process bypasses beforeunload, so we cannot
+  // rely on a final save-on-close — real-time sync is the only reliable approach.
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const snapshot = tabs.map((t) => ({
+      title: t.title,
+      sessionConfig: t.sessionConfig || null,
+      quickConnect: t.quickConnect || null,
+      // never persist plaintext passwords
+      password: null,
+    }));
+    window.electronAPI.tabs.save(snapshot);
+  }, [tabs]);
 
   // Listen for menu events
   useEffect(() => {
