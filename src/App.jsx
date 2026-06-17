@@ -24,6 +24,7 @@ export default function App() {
   const [sessions, setSessions] = useState([]);
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
+  const [activityTabs, setActivityTabs] = useState(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingSession, setEditingSession] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(240);
@@ -301,6 +302,25 @@ export default function App() {
     if (fn) fn(text);
   }, [activeTabId]);
 
+  const handleSelectTab = useCallback((tabId) => {
+    setActiveTabId(tabId);
+    setActivityTabs((prev) => {
+      if (!prev.has(tabId)) return prev;
+      const next = new Set(prev);
+      next.delete(tabId);
+      return next;
+    });
+  }, []);
+
+  const handleActivity = useCallback((tabId) => {
+    setActivityTabs((prev) => {
+      if (prev.has(tabId)) return prev;
+      const next = new Set(prev);
+      next.add(tabId);
+      return next;
+    });
+  }, []);
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
@@ -311,7 +331,8 @@ export default function App() {
           <TabBar
             tabs={tabs}
             activeTabId={activeTabId}
-            onSelect={setActiveTabId}
+            activityTabs={activityTabs}
+            onSelect={handleSelectTab}
             onClose={handleCloseTab}
             onNew={handleNewTab}
             onDuplicate={handleDuplicateTab}
@@ -374,6 +395,7 @@ export default function App() {
                               password={tab.password}
                               isActive={tab.id === activeTabId}
                               onStatusChange={(status) => handleTabStatusChange(tab.id, status)}
+                              onActivity={() => handleActivity(tab.id)}
                               onClose={tab.splits.length > 1 ? () => handleCloseSplit(tab.id, split.id) : null}
                               onReady={(sendFn) => { terminalSendRefs.current[tab.id] = sendFn; }}
                             />

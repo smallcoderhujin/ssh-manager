@@ -38,7 +38,7 @@ function nowStr() {
 
 export default function TerminalPane({
   splitId, tabId, sessionConfig, quickConnect, password,
-  isActive, onStatusChange, onClose, onReady,
+  isActive, onStatusChange, onClose, onReady, onActivity,
 }) {
   const containerRef = useRef(null);
   const gutterInnerRef = useRef(null);
@@ -62,8 +62,14 @@ export default function TerminalPane({
   const exitCleanupRef = useRef(null);
   const reconnectRef = useRef(null);
   const isComposingRef = useRef(false);
+  const isActiveRef = useRef(isActive);
+  const onActivityRef = useRef(onActivity);
   // Mirrors `status` state synchronously so onData closures can read it without stale captures
   const statusRef = useRef('connecting');
+
+  // Keep refs in sync so PTY data closures always see current values
+  isActiveRef.current = isActive;
+  onActivityRef.current = onActivity;
 
   const updateStatus = useCallback((s) => {
     statusRef.current = s;
@@ -255,6 +261,8 @@ export default function TerminalPane({
         if (id === result.id) {
           // data is Uint8Array (Buffer serialized by Electron IPC) or string
           term.write(data instanceof Uint8Array ? data : data, trackTimestamps);
+          // Notify parent when new output arrives in a background tab
+          if (!isActiveRef.current) onActivityRef.current?.();
         }
       });
 
@@ -404,7 +412,10 @@ export default function TerminalPane({
     };
 
     const dataUnsub = window.electronAPI.terminal.onData(({ id, data }) => {
-      if (id === result.id) termRef.current?.write(data, trackTimestamps);
+      if (id === result.id) {
+        termRef.current?.write(data, trackTimestamps);
+        if (!isActiveRef.current) onActivityRef.current?.();
+      }
     });
     const zmodemUnsub = window.electronAPI.terminal.onZmodem((msg) => {
       if (msg.id !== result.id) return;

@@ -621,6 +621,25 @@ html, body, #root {
   text-overflow: ellipsis;
 }
 
+/* Activity indicator: tab has new output while not focused */
+.tab.tab-activity .tab-title {
+  color: #4a9eff;
+}
+
+.tab-activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4a9eff;
+  flex-shrink: 0;
+  animation: tab-activity-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes tab-activity-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
 .tab-close {
   background: transparent;
   border: none;

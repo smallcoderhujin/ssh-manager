@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 
 export default function TabBar({
-  tabs, activeTabId, onSelect, onClose, onNew, onDuplicate, onReorder,
+  tabs, activeTabId, activityTabs, onSelect, onClose, onNew, onDuplicate, onReorder,
   onAddSession, onImportSshConfig, onImportSessions, onExportSessions,
 }) {
   const isWin = window.electronAPI?.platform === 'win32';
@@ -61,6 +61,7 @@ export default function TabBar({
           tab={tab}
           index={idx}
           isActive={tab.id === activeTabId}
+          hasActivity={activityTabs?.has(tab.id) ?? false}
           insertBefore={insertAt === idx}
           insertAfter={insertAt === idx + 1 && idx === tabs.length - 1}
           onSelect={() => onSelect(tab.id)}
@@ -85,7 +86,7 @@ export default function TabBar({
   );
 }
 
-function Tab({ tab, index, isActive, insertBefore, insertAfter, onSelect, onClose, onDuplicate,
+function Tab({ tab, index, isActive, hasActivity, insertBefore, insertAfter, onSelect, onClose, onDuplicate,
                onDragStart, onDragOver, onDrop, onDragEnd }) {
   const statusClass =
     tab.status === 'connected' ? 'connected'
@@ -94,7 +95,7 @@ function Tab({ tab, index, isActive, insertBefore, insertAfter, onSelect, onClos
 
   return (
     <div
-      className={`tab ${isActive ? 'active' : ''}${insertBefore ? ' tab-drop-before' : ''}${insertAfter ? ' tab-drop-after' : ''}`}
+      className={`tab ${isActive ? 'active' : ''}${hasActivity ? ' tab-activity' : ''}${insertBefore ? ' tab-drop-before' : ''}${insertAfter ? ' tab-drop-after' : ''}`}
       draggable
       onClick={onSelect}
       onDoubleClick={onDuplicate}
@@ -106,6 +107,7 @@ function Tab({ tab, index, isActive, insertBefore, insertAfter, onSelect, onClos
     >
       <span className={`tab-status ${statusClass}`} />
       <span className="tab-title">{tab.title}</span>
+      {hasActivity && <span className="tab-activity-dot" />}
       <button className="tab-close" onClick={onClose} title="关闭标签页 (⌘W)">✕</button>
     </div>
   );
