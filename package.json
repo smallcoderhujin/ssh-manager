@@ -9,7 +9,7 @@
     "electron:dev": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "build": "vite build && electron-builder --publish never",
     "build:mac": "vite build && electron-builder --mac --publish never",
-    "build:win": "vite build && electron-builder --win --publish never",
+    "build:win": "node scripts/compile-ime-helper.js && vite build && electron-builder --win --publish never",
     "rebuild:mac": "electron-rebuild -f -w node-pty",
     "preview": "vite preview"
   },
@@ -41,7 +41,8 @@
       "main": "electron/main.js"
     },
     "extraResources": [
-      { "from": "assets/switch-ime", "to": "switch-ime", "filter": ["**/*"] }
+      { "from": "assets/switch-ime",     "to": "switch-ime" },
+      { "from": "assets/ime-helper.exe", "to": "ime-helper.exe" }
     ],
     "afterPack": "scripts/afterPack.js",
     "mac": {
@@ -112,6 +113,7 @@
   },
   "dependencies": {
     "electron-store": "^8.1.0",
+    "koffi": "^3.0.2",
     "node-pty": "^1.0.0",
     "xterm-addon-webgl": "^0.16.0",
     "zmodem.js": "^0.1.10"

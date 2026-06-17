@@ -1,4 +1,45 @@
 const { contextBridge, ipcRenderer, clipboard } = require('electron');
+const os = require('os');
+
+// On Windows, switch the focused window's IME to English (alphanumeric) mode
+// by calling IMM32 from within the renderer process (same process as Chromium,
+// so ImmGetContext returns a valid HIMC unlike calls from the main process).
+if (os.platform() === 'win32') {
+  try {
+    const koffi = require('koffi');
+    const user32 = koffi.load('user32.dll');
+    const imm32 = koffi.load('imm32.dll');
+    const GetFocus = user32.func('void* GetFocus()');
+    const ImmGetContext = imm32.func('void* ImmGetContext(void* hwnd)');
+    const ImmSetConversionStatus = imm32.func('bool ImmSetConversionStatus(void* himc, unsigned int fdwConversion, unsigned int fdwSentence)');
+    const ImmReleaseContext = imm32.func('bool ImmReleaseContext(void* hwnd, void* himc)');
+    const IME_CMODE_ALPHANUMERIC = 0; // English mode
+
+    const ImmSetOpenStatus = imm32.func('bool ImmSetOpenStatus(void* himc, bool fOpen)');
+
+    const switchImeToEnglish = () => {
+      try {
+        const hwnd = GetFocus();
+        if (!hwnd) return;
+        const himc = ImmGetContext(hwnd);
+        if (!himc) return;
+        ImmSetOpenStatus(himc, false);
+        ImmSetConversionStatus(himc, IME_CMODE_ALPHANUMERIC, 0);
+        ImmReleaseContext(hwnd, himc);
+      } catch (e) {
+        console.error('[IME-preload] error:', e.message);
+      }
+    };
+
+    // Run immediately and on every focus/load event
+    window.addEventListener('DOMContentLoaded', switchImeToEnglish);
+    window.addEventListener('focus', switchImeToEnglish);
+    ipcRenderer.on('window:focused', switchImeToEnglish);
+    console.log('[IME-preload] initialized');
+  } catch (e) {
+    console.error('[IME-preload] init failed:', e.message);
+  }
+}
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal API

@@ -9,6 +9,82 @@ const Zmodem = require('zmodem.js');
 const isMac = process.platform === 'darwin';
 const isWin = process.platform === 'win32';
 
+// On Windows, use ImmAssociateContextEx(hwnd, NULL, IACE_CHILDREN) called
+// directly from this (browser) process so the call is in-process and valid.
+// ime-helper.exe was a separate process — ImmGetContext across processes
+// always returns NULL, so it was a no-op. koffi in preload runs too late
+// (after Chromium has already associated IME with its child HWNDs).
+// The browser process owns all the HWNDs; calling from here is the only
+// reliable path.
+let _disableWinIME = (win) => {};
+if (isWin) {
+  try {
+    const koffi = require('koffi');
+    const user32 = koffi.load('user32.dll');
+    const imm32 = koffi.load('imm32.dll');
+
+    // Walk child windows to find Chrome_RenderWidgetHostHWND — the actual
+    // input window where Chromium attaches its IME context. ImmGetContext on
+    // the top-level HWND returns a dummy context; we need the render widget.
+    const FindWindowEx = user32.func('void* FindWindowExA(void* hwndParent, void* hwndChildAfter, const char* lpszClass, const char* lpszWindow)');
+    const GetClassNameA = user32.func('int GetClassNameA(void* hwnd, char* lpClassName, int nMaxCount)');
+    const ImmGetContext = imm32.func('void* ImmGetContext(void* hwnd)');
+    const ImmSetConversionStatus = imm32.func('bool ImmSetConversionStatus(void* himc, unsigned int fdwConversion, unsigned int fdwSentence)');
+    const ImmSetOpenStatus = imm32.func('bool ImmSetOpenStatus(void* himc, bool fOpen)');
+    const ImmReleaseContext = imm32.func('bool ImmReleaseContext(void* hwnd, void* himc)');
+    const IME_CMODE_ALPHANUMERIC = 0; // English/alphanumeric mode
+
+    // Recursively search for Chrome_RenderWidgetHostHWND under parentHwnd
+    const findRenderWidget = (parentHwnd, depth = 0) => {
+      if (depth > 5) return null;
+      let child = FindWindowEx(parentHwnd, null, null, null);
+      while (child) {
+        const buf = Buffer.alloc(128);
+        GetClassNameA(child, buf, 128);
+        const cls = buf.toString('utf8').split('\0')[0];
+        if (cls === 'Chrome_RenderWidgetHostHWND') return child;
+        const found = findRenderWidget(child, depth + 1);
+        if (found) return found;
+        child = FindWindowEx(parentHwnd, child, null, null);
+      }
+      return null;
+    };
+
+    _disableWinIME = (win) => {
+      if (!win || win.isDestroyed()) return;
+      try {
+        const hwndBuf = win.getNativeWindowHandle();
+        const topHwnd = process.arch === 'x64'
+          ? hwndBuf.readBigUInt64LE(0)
+          : BigInt(hwndBuf.readUInt32LE(0));
+
+        // Try the render widget first, fall back to top-level
+        const renderHwnd = findRenderWidget(topHwnd);
+        const targetHwnd = renderHwnd || topHwnd;
+
+        const himc = ImmGetContext(targetHwnd);
+        const msg = `[IME] renderHwnd=${renderHwnd}, ImmGetContext=${himc}`;
+        console.log(msg);
+        win.webContents.executeJavaScript(`console.log(${JSON.stringify(msg)})`).catch(() => {});
+
+        if (himc) {
+          const ok1 = ImmSetConversionStatus(himc, IME_CMODE_ALPHANUMERIC, 0);
+          const ok2 = ImmSetOpenStatus(himc, false);
+          const msg2 = `[IME] ImmSetConversionStatus=${ok1}, ImmSetOpenStatus(false)=${ok2}`;
+          console.log(msg2);
+          win.webContents.executeJavaScript(`console.log(${JSON.stringify(msg2)})`).catch(() => {});
+          ImmReleaseContext(targetHwnd, himc);
+        }
+      } catch (e) {
+        console.error('[IME] error:', e.message);
+      }
+    };
+    console.log('[IME] koffi ready');
+  } catch (e) {
+    console.error('[IME] koffi init failed:', e.message);
+  }
+}
+
 // Resolve ssh binary cross-platform
 function findSshBinary() {
   if (isWin) {
@@ -69,6 +145,20 @@ function createWindow() {
 
   win.once('ready-to-show', () => {
     win.show();
+    if (isDev) win.webContents.openDevTools({ mode: 'detach' });
+  });
+
+  // Disable IME on load (covers first open) and on every focus (covers
+  // Alt-Tab back). Both are needed because Chromium may re-associate IME
+  // with its child window after the renderer finishes loading.
+  win.webContents.on('did-finish-load', () => {
+    _disableWinIME(win);
+    // Retry after Chromium finishes attaching its render widget HWND
+    setTimeout(() => _disableWinIME(win), 500);
+  });
+  win.on('focus', () => {
+    _disableWinIME(win);
+    if (!win.isDestroyed()) win.webContents.send('window:focused');
   });
 
   win.on('close', async (e) => {

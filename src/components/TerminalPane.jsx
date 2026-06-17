@@ -61,6 +61,7 @@ export default function TerminalPane({
   const dataCleanupRef = useRef(null);
   const exitCleanupRef = useRef(null);
   const reconnectRef = useRef(null);
+  const isComposingRef = useRef(false);
   // Mirrors `status` state synchronously so onData closures can read it without stale captures
   const statusRef = useRef('connecting');
 
@@ -174,16 +175,37 @@ export default function TerminalPane({
       if (sel && window.electronAPI) window.electronAPI.clipboard.writeText(sel);
     });
 
-    // Hint to OS/browser that this is a plain-text ASCII input area.
-    // Does NOT block IME — the OS-level switch is handled in main.js on window focus.
+    // Disable IME on the xterm textarea so Windows input methods don't activate
+    // when the terminal gets focus. inputmode="none" tells Chromium not to engage
+    // TSF/IME; the compositionstart listener cancels any composition that slips
+    // through (e.g. when the user presses a CJK hotkey before focus settles).
     const setupImeHint = () => {
       const ta = term.textarea;
       if (!ta) return;
+      ta.setAttribute('inputmode', 'none');
       ta.setAttribute('lang', 'en');
       ta.setAttribute('autocomplete', 'off');
       ta.setAttribute('autocorrect', 'off');
       ta.setAttribute('autocapitalize', 'off');
       ta.setAttribute('spellcheck', 'false');
+      // TSF-based IMEs (Microsoft Pinyin on Win10/11) ignore all IMM32 calls,
+      // so we can't switch the IME language via Windows APIs. Instead:
+      // 1. On compositionstart, blur the textarea to cancel the composition
+      //    and dismiss the candidate window, then refocus.
+      // 2. isComposingRef guards term.onData so any committed text is discarded.
+      ta.addEventListener('compositionstart', () => {
+        isComposingRef.current = true;
+        ta.blur();
+        requestAnimationFrame(() => ta.focus());
+      }, true);
+      ta.addEventListener('compositionend', (e) => {
+        if (!e.data) {
+          isComposingRef.current = false;
+        } else {
+          // Real commit before blur could cancel — wait for xterm's deferred onData.
+          setTimeout(() => { isComposingRef.current = false; }, 50);
+        }
+      }, true);
     };
     if (term.textarea) setupImeHint();
     else requestAnimationFrame(setupImeHint);
@@ -266,6 +288,7 @@ export default function TerminalPane({
       });
 
       term.onData((data) => {
+        if (isComposingRef.current) return;
         if (statusRef.current === 'disconnected') {
           if (data === '\r' && reconnectRef.current) reconnectRef.current();
         } else if (terminalIdRef.current !== null) {
@@ -331,6 +354,18 @@ export default function TerminalPane({
       }, 50);
     }
   }, [isActive]);
+
+  // Re-seat textarea focus when the Electron window regains focus so that
+  // inputmode="none" takes effect and the Windows IME stays off.
+  useEffect(() => {
+    const unsub = window.electronAPI?.window?.onFocus?.(() => {
+      const ta = termRef.current?.textarea;
+      if (!ta) return;
+      ta.blur();
+      requestAnimationFrame(() => ta.focus());
+    });
+    return () => unsub?.();
+  }, []);
 
   // ── Reconnect ─────────────────────────────────────────────────────────────
   const handleReconnect = useCallback(async () => {
