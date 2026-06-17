@@ -32,12 +32,33 @@ export default function App() {
   const resizeStartWidth = useRef(0);
   // Map of tabId -> sendCommand function registered by each TerminalPane
   const terminalSendRefs = useRef({});
+  // Guard: don't overwrite stored tabs with [] before restore completes
+  const hasRestoredRef = useRef(false);
+  // Mirror of activeTabId kept in a ref so it can be read inside setTabs updaters
+  // without stale closures (the ref is updated on every render, before effects run).
+  const activeTabIdRef = useRef(null);
+
+  // Keep ref in sync with state on every render (no deps = always current)
+  activeTabIdRef.current = activeTabId;
+
+  // Guardian: ensure activeTabId always points to an existing tab.
+  useEffect(() => {
+    if (tabs.length === 0) {
+      if (activeTabId !== null) setActiveTabId(null);
+      return;
+    }
+    if (!tabs.find((t) => t.id === activeTabId)) {
+      setActiveTabId(tabs[tabs.length - 1].id);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs]);
 
   // Load sessions + restore last open tabs on mount
   useEffect(() => {
     if (!window.electronAPI) return;
     window.electronAPI.sessions.getAll().then(setSessions);
     window.electronAPI.tabs.restore().then((savedTabs) => {
+      hasRestoredRef.current = true;
       if (!savedTabs || savedTabs.length === 0) return;
       const restored = savedTabs.map((t) => createTab({
         title: t.title,
@@ -55,6 +76,8 @@ export default function App() {
   // rely on a final save-on-close — real-time sync is the only reliable approach.
   useEffect(() => {
     if (!window.electronAPI) return;
+    // Skip the initial render before restore has finished loading saved tabs
+    if (!hasRestoredRef.current) return;
     const snapshot = tabs.map((t) => ({
       title: t.title,
       sessionConfig: t.sessionConfig || null,
@@ -114,16 +137,14 @@ export default function App() {
     if (!tabId) return;
     setTabs((prev) => {
       const idx = prev.findIndex((t) => t.id === tabId);
+      if (idx === -1) return prev;
       const next = prev.filter((t) => t.id !== tabId);
-      if (next.length > 0 && tabId === activeTabId) {
-        const newActive = next[Math.min(idx, next.length - 1)];
-        setActiveTabId(newActive.id);
-      } else if (next.length === 0) {
-        setActiveTabId(null);
+      if (tabId === activeTabIdRef.current) {
+        setActiveTabId(next.length > 0 ? next[Math.min(idx, next.length - 1)].id : null);
       }
       return next;
     });
-  }, [activeTabId]);
+  }, []);
 
   const handleDuplicateSession = useCallback(async (session) => {
     if (!window.electronAPI) return;

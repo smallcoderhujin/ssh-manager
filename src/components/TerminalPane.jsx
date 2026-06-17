@@ -127,13 +127,15 @@ export default function TerminalPane({
     fitAddonRef.current = fitAddon;
 
     // Use WebGL renderer for correct wrapped-line rendering.
-    // The default canvas renderer has a known dirty-row tracking bug where
-    // continuation rows of wrapped lines are not repainted, appearing blank.
-    // Fall back to canvas silently if WebGL is unavailable.
+    // Keep a ref to the addon so we can dispose it BEFORE term.dispose() in cleanup.
+    // Disposing the terminal while the WebGL addon is still attached throws
+    // "Cannot read properties of undefined (reading 'onRequestRedraw')" which
+    // crashes the entire React tree when the tab is closed.
+    let webglAddon = null;
     try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
+      webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => { try { webglAddon.dispose(); } catch (_) {} });
+      term.loadAddon(webglAddon);
     } catch (_) {}
 
     // ── Gutter sync ──
@@ -303,7 +305,11 @@ export default function TerminalPane({
       if (exitCleanupRef.current) exitCleanupRef.current();
       if (terminalIdRef.current !== null && window.electronAPI)
         window.electronAPI.terminal.kill(terminalIdRef.current);
-      term.dispose();
+      // Dispose WebGL addon BEFORE the terminal to avoid
+      // "Cannot read properties of undefined (reading 'onRequestRedraw')"
+      // thrown by xterm-addon-webgl's internal cleanup, which crashes React.
+      try { webglAddon?.dispose(); } catch (_) {}
+      try { term.dispose(); } catch (_) {}
     };
   }, []);
 
