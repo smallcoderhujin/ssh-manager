@@ -3,6 +3,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { WebglAddon } from 'xterm-addon-webgl';
+import { SearchAddon } from 'xterm-addon-search';
 import 'xterm/css/xterm.css';
 
 const TERMINAL_THEME = {
@@ -58,6 +59,12 @@ export default function TerminalPane({
   const [gutterViewport, setGutterViewport] = useState({ y: 0, rows: 24, total: 0, cellHeight: fontSize * LINE_HEIGHT });
   const cellHeightRef = useRef(fontSize * LINE_HEIGHT);
 
+  const webglAddonRef = useRef(null); // only the active tab holds a WebGL context
+  const searchAddonRef = useRef(null);
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResult, setSearchResult] = useState(null); // { current, total } | null
+  const searchInputRef = useRef(null);
   const dataCleanupRef = useRef(null);
   const exitCleanupRef = useRef(null);
   const reconnectRef = useRef(null);
@@ -97,6 +104,12 @@ export default function TerminalPane({
       if (e.key === '=' || e.key === '+') { e.preventDefault(); changeFontSize(Math.min(fontSizeRef.current + 1, 32)); }
       else if (e.key === '-') { e.preventDefault(); changeFontSize(Math.max(fontSizeRef.current - 1, 8)); }
       else if (e.key === '0') { e.preventDefault(); changeFontSize(13); }
+      else if (e.key === 'f' || e.key === 'F') {
+        if (!isActiveRef.current) return;
+        e.preventDefault();
+        setSearchVisible(true);
+        setTimeout(() => searchInputRef.current?.select(), 30);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -124,26 +137,24 @@ export default function TerminalPane({
       macOptionIsMeta: true,
       macOptionClickForcesSelection: false,
       rightClickSelectsWord: false,
+      allowProposedApi: true,
+      overviewRulerWidth: 12,
     });
 
     const fitAddon = new FitAddon();
+    const searchAddon = new SearchAddon();
     term.loadAddon(fitAddon);
+    term.loadAddon(searchAddon);
     term.loadAddon(new WebLinksAddon());
     term.open(containerRef.current);
+    searchAddonRef.current = searchAddon;
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Use WebGL renderer for correct wrapped-line rendering.
-    // Keep a ref to the addon so we can dispose it BEFORE term.dispose() in cleanup.
-    // Disposing the terminal while the WebGL addon is still attached throws
-    // "Cannot read properties of undefined (reading 'onRequestRedraw')" which
-    // crashes the entire React tree when the tab is closed.
-    let webglAddon = null;
-    try {
-      webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => { try { webglAddon.dispose(); } catch (_) {} });
-      term.loadAddon(webglAddon);
-    } catch (_) {}
+    // WebGL is loaded/unloaded by the isActive effect below so only the
+    // currently-visible tab holds a WebGL context. Browsers cap concurrent
+    // WebGL contexts at ~8; exceeding that causes "Too many active WebGL
+    // contexts" warnings and dimension errors in inactive terminals.
 
     // ── Gutter sync ──
     // Read the actual cell height from xterm's internal renderer so the gutter
@@ -175,8 +186,9 @@ export default function TerminalPane({
       syncGutter();
     };
 
-    // Select → copy
+    // Select → copy (skip when search bar is open to avoid overwriting clipboard with match highlights)
     term.onSelectionChange(() => {
+      if (searchInputRef.current === document.activeElement) return;
       const sel = term.getSelection();
       if (sel && window.electronAPI) window.electronAPI.clipboard.writeText(sel);
     });
@@ -194,23 +206,25 @@ export default function TerminalPane({
       ta.setAttribute('autocorrect', 'off');
       ta.setAttribute('autocapitalize', 'off');
       ta.setAttribute('spellcheck', 'false');
-      // TSF-based IMEs (Microsoft Pinyin on Win10/11) ignore all IMM32 calls,
-      // so we can't switch the IME language via Windows APIs. Instead:
-      // 1. On compositionstart, blur the textarea to cancel the composition
-      //    and dismiss the candidate window, then refocus.
-      // 2. isComposingRef guards term.onData so any committed text is discarded.
+      // On Windows, TSF-based IMEs (Microsoft Pinyin on Win10/11) ignore
+      // inputmode="none", so we blur the textarea on compositionstart to
+      // cancel the composition and dismiss the candidate window, then refocus.
+      // On macOS this blur/refocus is NOT needed — inputmode="none" is enough —
+      // and doing it leaves isComposingRef stuck at true, permanently blocking input.
+      const isWin = window.electronAPI?.platform === 'win32';
       ta.addEventListener('compositionstart', () => {
         isComposingRef.current = true;
-        ta.blur();
-        requestAnimationFrame(() => ta.focus());
-      }, true);
-      ta.addEventListener('compositionend', (e) => {
-        if (!e.data) {
-          isComposingRef.current = false;
-        } else {
-          // Real commit before blur could cancel — wait for xterm's deferred onData.
-          setTimeout(() => { isComposingRef.current = false; }, 50);
+        if (isWin) {
+          ta.blur();
+          requestAnimationFrame(() => {
+            isComposingRef.current = false;
+            ta.focus();
+          });
         }
+      }, true);
+      ta.addEventListener('compositionend', () => {
+        // Always reset after a brief delay so xterm's deferred onData fires first.
+        setTimeout(() => { isComposingRef.current = false; }, 50);
       }, true);
     };
     if (term.textarea) setupImeHint();
@@ -287,6 +301,10 @@ export default function TerminalPane({
           terminalIdRef.current = null;
           updateStatus('disconnected');
           setExitInfo({ exitCode, signal });
+          // Soft-reset terminal modes (DECSTR) so lingering state from vim/less/htop
+          // (application cursor keys, mouse tracking, focus tracking, etc.) doesn't
+          // cause scroll wheel events to be sent as escape sequences on next command.
+          term.write('\x1b[!p');
           term.writeln('');
           term.writeln(`\x1b[33m[Process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m`);
           if (sessionConfig || quickConnect) {
@@ -339,7 +357,9 @@ export default function TerminalPane({
       // Dispose WebGL addon BEFORE the terminal to avoid
       // "Cannot read properties of undefined (reading 'onRequestRedraw')"
       // thrown by xterm-addon-webgl's internal cleanup, which crashes React.
-      try { webglAddon?.dispose(); } catch (_) {}
+      try { webglAddonRef.current?.dispose(); } catch (_) {}
+      webglAddonRef.current = null;
+      searchAddonRef.current = null;
       try { term.dispose(); } catch (_) {}
     };
   }, []);
@@ -360,6 +380,39 @@ export default function TerminalPane({
         termRef.current?.focus();
         try { fitAddonRef.current?.fit(); } catch (_) {}
       }, 50);
+      // Reset lingering terminal modes (DECCKM, mouse tracking, focus tracking)
+      // so that scrolling with the mouse wheel doesn't send cursor-key escape
+      // sequences to the PTY when commands like tail/cat are running.
+      if (terminalIdRef.current !== null) {
+        window.electronAPI?.terminal.write(terminalIdRef.current, '\x1b[!p');
+      }
+    }
+  }, [isActive]);
+
+  // Load WebGL only for the active tab; dispose it for inactive tabs.
+  // This keeps concurrent WebGL contexts at 1, avoiding the browser's
+  // "Too many active WebGL contexts" limit that causes dimension crashes.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+
+    if (isActive) {
+      if (!webglAddonRef.current) {
+        try {
+          const addon = new WebglAddon();
+          addon.onContextLoss(() => {
+            try { addon.dispose(); } catch (_) {}
+            webglAddonRef.current = null;
+          });
+          term.loadAddon(addon);
+          webglAddonRef.current = addon;
+        } catch (_) {}
+      }
+    } else {
+      if (webglAddonRef.current) {
+        try { webglAddonRef.current.dispose(); } catch (_) {}
+        webglAddonRef.current = null;
+      }
     }
   }, [isActive]);
 
@@ -374,6 +427,43 @@ export default function TerminalPane({
     });
     return () => unsub?.();
   }, []);
+
+  // ── Search ────────────────────────────────────────────────────────────────
+  const doSearch = useCallback((query, direction = 'next') => {
+    const addon = searchAddonRef.current;
+    if (!addon || !query) { setSearchResult(null); return; }
+    const opts = {
+      regex: false, wholeWord: false, caseSensitive: false,
+      decorations: {
+        matchBackground: '#4a9eff33',
+        matchBorder: '#4a9eff',
+        matchOverviewRuler: '#4a9eff',
+        activeMatchBackground: '#4a9effaa',
+        activeMatchBorder: '#4a9eff',
+        activeMatchColorOverviewRuler: '#4a9eff',
+      },
+    };
+    const found = direction === 'next'
+      ? addon.findNext(query, opts)
+      : addon.findPrevious(query, opts);
+    setSearchResult(found ? { found: true } : { found: false });
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    setSearchVisible(false);
+    setSearchQuery('');
+    setSearchResult(null);
+    searchAddonRef.current?.clearDecorations?.();
+    termRef.current?.focus();
+  }, []);
+
+  const handleSearchKeyDown = useCallback((e) => {
+    if (e.key === 'Escape') { closeSearch(); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      doSearch(searchQuery, e.shiftKey ? 'prev' : 'next');
+    }
+  }, [searchQuery, doSearch, closeSearch]);
 
   // ── Reconnect ─────────────────────────────────────────────────────────────
   const handleReconnect = useCallback(async () => {
@@ -431,6 +521,7 @@ export default function TerminalPane({
         terminalIdRef.current = null;
         updateStatus('disconnected');
         setExitInfo({ exitCode, signal });
+        termRef.current?.write('\x1b[!p');
         termRef.current?.writeln('');
         termRef.current?.writeln(`\x1b[33m[Process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m`);
         if (sessionConfig || quickConnect) {
@@ -577,6 +668,44 @@ export default function TerminalPane({
           onClick={() => termRef.current?.focus()}
         />
       </div>
+
+      {/* Search bar */}
+      {searchVisible && (
+        <div style={{
+          flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6,
+          padding: '5px 10px', background: '#1a1d23', borderTop: '1px solid #2e3440',
+        }}>
+          <span style={{ fontSize: 12, color: '#666', whiteSpace: 'nowrap' }}>查找:(F)</span>
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              doSearch(e.target.value, 'next');
+            }}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="搜索…"
+            style={{
+              flex: 1, maxWidth: 260, background: '#111', border: '1px solid #3a3a3a',
+              borderRadius: 4, color: '#e8e8e8', fontSize: 13, padding: '3px 8px', outline: 'none',
+              ...(searchResult?.found === false ? { borderColor: '#ff5f57' } : {}),
+            }}
+            autoFocus
+          />
+          {searchResult?.found === false && (
+            <span style={{ fontSize: 11, color: '#ff5f57', whiteSpace: 'nowrap' }}>无结果</span>
+          )}
+          <button
+            style={{ fontSize: 16, lineHeight: 1, padding: '1px 6px', background: 'none', border: '1px solid #3a3a3a', borderRadius: 4, color: '#888', cursor: 'pointer' }}
+            onClick={() => doSearch(searchQuery, 'prev')} title="上一个 (Shift+Enter)">↑</button>
+          <button
+            style={{ fontSize: 16, lineHeight: 1, padding: '1px 6px', background: 'none', border: '1px solid #3a3a3a', borderRadius: 4, color: '#888', cursor: 'pointer' }}
+            onClick={() => doSearch(searchQuery, 'next')} title="下一个 (Enter)">↓</button>
+          <button
+            style={{ fontSize: 12, padding: '2px 8px', background: 'none', border: '1px solid #3a3a3a', borderRadius: 4, color: '#888', cursor: 'pointer' }}
+            onClick={closeSearch} title="关闭 (Esc)">✕</button>
+        </div>
+      )}
 
       {/* Reconnect bar */}
       {exitInfo && (

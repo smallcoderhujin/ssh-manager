@@ -41,8 +41,14 @@
       "main": "electron/main.js"
     },
     "extraResources": [
-      { "from": "assets/switch-ime",     "to": "switch-ime" },
-      { "from": "assets/ime-helper.exe", "to": "ime-helper.exe" }
+      {
+        "from": "assets/switch-ime",
+        "to": "switch-ime"
+      },
+      {
+        "from": "assets/ime-helper.exe",
+        "to": "ime-helper.exe"
+      }
     ],
     "afterPack": "scripts/afterPack.js",
     "mac": {
@@ -115,6 +121,7 @@
     "electron-store": "^8.1.0",
     "koffi": "^3.0.2",
     "node-pty": "^1.0.0",
+    "xterm-addon-search": "^0.13.0",
     "xterm-addon-webgl": "^0.16.0",
     "zmodem.js": "^0.1.10"
   },

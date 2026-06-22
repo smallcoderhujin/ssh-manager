@@ -267,7 +267,7 @@ export default function CommandBar({ onSendCommand }) {
 
   const handleSend = useCallback((cmd) => {
     if (!onSendCommand) return;
-    onSendCommand(cmd.command + '\r');
+    onSendCommand('\x15' + cmd.command);
   }, [onSendCommand]);
 
   const handleContextMenu = useCallback((e, cmd) => {

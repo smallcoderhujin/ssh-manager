@@ -356,8 +356,35 @@ ipcMain.handle('terminal:create', (event, options) => {
   const disposeAutofill = setupPasswordAutofill(ptyProcess, password);
 
   // ── Zmodem sentry ────────────────────────────────────────────────────────
+  // Suppress terminal output during an active ZMODEM session.
+  // The UI shows its own progress overlay; letting ZMODEM binary frames / file
+  // bytes pass through causes garbled output after the transfer ends.
+  let zmodemActive = false;
+  let zmodemRetractTimer = null;
+
+  // Called once the sentry confirms the remote has finished (on_retract).
+  // Waits a short grace period for any final status bytes from rz/sz, then
+  // re-enables normal terminal display.
+  const releaseZmodem = (reason) => {
+    console.log(`[zmodem id=${id}] releaseZmodem called reason=${reason} zmodemActive=${zmodemActive}`);
+    clearTimeout(zmodemRetractTimer);
+    zmodemRetractTimer = setTimeout(() => {
+      console.log(`[zmodem id=${id}] gate opened after grace period`);
+      zmodemActive = false;
+      try { ptyProcess.write('\r\n'); } catch (_) {}
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('terminal:data', { id, data: Buffer.from('\r\x1b[K') });
+      }
+    }, 500);
+  };
+
   const sentry = new Zmodem.Sentry({
     to_terminal: (octets) => {
+      if (zmodemActive) {
+        console.log(`[zmodem id=${id}] to_terminal SUPPRESSED ${octets.length} bytes`);
+        return;
+      }
+      console.log(`[zmodem id=${id}] to_terminal PASS ${octets.length} bytes`);
       if (win && !win.isDestroyed()) {
         win.webContents.send('terminal:data', { id, data: Buffer.from(octets) });
       }
@@ -366,24 +393,30 @@ ipcMain.handle('terminal:create', (event, options) => {
       try { ptyProcess.write(Buffer.from(octets)); } catch (_) {}
     },
     on_retract: () => {
+      console.log(`[zmodem id=${id}] on_retract fired zmodemActive=${zmodemActive}`);
+      releaseZmodem('on_retract');
       if (win && !win.isDestroyed()) {
         win.webContents.send('terminal:zmodem', { id, type: 'end' });
       }
     },
     on_detect: (detection) => {
-      handleZmodemDetection({ detection, id, win, ptyProcess });
+      console.log(`[zmodem id=${id}] on_detect fired role=${detection.get_session_role()}`);
+      zmodemActive = true;
+      clearTimeout(zmodemRetractTimer);
+      handleZmodemDetection({
+        detection, id, win, ptyProcess,
+        onEnd: (r) => releaseZmodem(r || 'onEnd-fallback'),
+      });
     },
   });
 
   ptyProcess.onData((data) => {
-    // On Windows, node-pty may return strings even with encoding:null.
-    // Always normalize to Buffer so sentry.consume() gets proper byte values.
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
     try {
       sentry.consume(Array.from(buf));
-    } catch (_) {
-      // sentry error (e.g. after session ends) — fall back to direct send
-      if (win && !win.isDestroyed()) {
+    } catch (err) {
+      console.log(`[zmodem id=${id}] sentry.consume threw zmodemActive=${zmodemActive} err=${err.message} bytes=${buf.length} hex=${buf.slice(0,16).toString('hex')}`);
+      if (!zmodemActive && win && !win.isDestroyed()) {
         win.webContents.send('terminal:data', { id, data: buf });
       }
     }
@@ -402,10 +435,21 @@ ipcMain.handle('terminal:create', (event, options) => {
 });
 
 // ── Zmodem detection handler ─────────────────────────────────────────────
-async function handleZmodemDetection({ detection, id, win, ptyProcess }) {
-  // Correct API: get_session_role() returns 'receive'(sz) or 'send'(rz)
+async function handleZmodemDetection({ detection, id, win, ptyProcess, onEnd }) {
   const role = detection.get_session_role();
   win.webContents.send('terminal:zmodem', { id, type: 'start', direction: role });
+
+  // Called on every explicit exit path (upload done / download done / abort).
+  // For normal completions, on_retract will fire and call onEnd (= releaseZmodem)
+  // once the remote sends ZFIN.  finish() just notifies the UI here; the actual
+  // gate release is driven by on_retract → releaseZmodem.
+  // For abort/error paths where on_retract may never fire, onEnd is still called
+  // so releaseZmodem runs as a fallback.
+  const finish = () => {
+    // onEnd === releaseZmodem — schedules the 500 ms gate release.
+    // If on_retract already fired it, the clearTimeout inside prevents a double run.
+    onEnd?.();
+  };
 
   let session;
   try {
@@ -413,6 +457,7 @@ async function handleZmodemDetection({ detection, id, win, ptyProcess }) {
   } catch (e) {
     console.error('zmodem confirm failed:', e);
     win.webContents.send('terminal:zmodem', { id, type: 'end' });
+    finish();
     return;
   }
 
@@ -433,6 +478,7 @@ async function handleZmodemDetection({ detection, id, win, ptyProcess }) {
         if (canceled || !filePath) {
           offer.skip();
           notify({ type: 'end' });
+          finish();
           return;
         }
 
@@ -450,7 +496,10 @@ async function handleZmodemDetection({ detection, id, win, ptyProcess }) {
         notify({ type: 'done', name: details.name, size: fileData.length, savedPath: filePath });
       });
 
-      session.on('session_end', () => notify({ type: 'end' }));
+      session.on('session_end', () => {
+        notify({ type: 'end' });
+        finish();
+      });
 
       await session.start();
 
@@ -464,6 +513,7 @@ async function handleZmodemDetection({ detection, id, win, ptyProcess }) {
       if (canceled || filePaths.length === 0) {
         session.abort();
         notify({ type: 'end' });
+        finish();
         return;
       }
 
@@ -474,22 +524,38 @@ async function handleZmodemDetection({ detection, id, win, ptyProcess }) {
 
         const xfer = await session.send_offer({ name: fileName, size: fileData.length, mtime: new Date() });
         if (xfer) {
-          const CHUNK = 8192;
+          // Use 64 KB chunks and yield the event loop after each one.
+          // A tight synchronous loop blocks onData() so ZRPOS/ZACK frames
+          // from the remote rz can never be processed, causing rz to abort.
+          const CHUNK = 65536;
+          let chunksSent = 0;
           for (let offset = 0; offset < fileData.length; offset += CHUNK) {
-            xfer.send(fileData.slice(offset, offset + CHUNK));
+            xfer.send(fileData.slice(offset, Math.min(offset + CHUNK, fileData.length)));
+            chunksSent++;
             notify({ type: 'progress', name: fileName, received: Math.min(offset + CHUNK, fileData.length), total: fileData.length });
+            await new Promise(resolve => setImmediate(resolve));
           }
-          await xfer.end_and_wait();
+          console.log(`[zmodem id=${id}] all chunks sent total=${chunksSent}, calling xfer.end([])`);
+          // Timeout: 60s base + 1s per MB, so a 1.4 GB file gets ~1500s max.
+          // Remote rz must flush the file to disk before sending ZRINIT back.
+          const endTimeoutMs = 60000 + Math.ceil(fileData.length / (1024 * 1024)) * 1000;
+          console.log(`[zmodem id=${id}] xfer.end timeout=${endTimeoutMs}ms`);
+          await Promise.race([
+            xfer.end([]).then(() => console.log(`[zmodem id=${id}] xfer.end([]) resolved`)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`xfer.end timeout after ${endTimeoutMs}ms`)), endTimeoutMs)),
+          ]);
         }
         notify({ type: 'done', name: fileName, size: fileData.length });
       }
 
       session.close();
       notify({ type: 'end' });
+      finish();
     }
   } catch (e) {
     console.error('zmodem transfer error:', e);
     notify({ type: 'end' });
+    finish();
   }
 }
 
