@@ -74,7 +74,10 @@ export default function Sidebar({ sessions, onConnect, onAdd, onEdit, onDelete, 
   };
 
   return (
-    <div className="sidebar" style={{ width: '100%' }}>
+    // flex:1 + minHeight:0 — the sidebar lives inside a column-flex tab
+    // container; without them it sizes to content and the session list
+    // can't scroll (bottom items get clipped).
+    <div className="sidebar" style={{ width: '100%', flex: 1, minHeight: 0 }}>
       <div className="sidebar-header">
         <input
           className="sidebar-search"

@@ -49,6 +49,7 @@ export default function TerminalPane({
 
   const [status, setStatus] = useState('connecting');
   const [exitInfo, setExitInfo] = useState(null);
+  const [networkOffline, setNetworkOffline] = useState(!navigator.onLine);
   const [fontSize, setFontSize] = useState(14);
   const fontSizeRef = useRef(14);
   const [zmodem, setZmodem] = useState(null); // null | { direction, name, received, total, done, savedPath }
@@ -60,8 +61,30 @@ export default function TerminalPane({
   const cellHeightRef = useRef(fontSize * LINE_HEIGHT);
 
   const webglAddonRef = useRef(null); // only the active tab holds a WebGL context
+  const termRowRef = useRef(null);    // gutter+terminal row div, positioning parent for dropdown
   const searchAddonRef = useRef(null);
+  const inputBufferRef = useRef('');   // tracks current input line for history
+  const inputModifiedByShellRef = useRef(false); // TAB / arrow modified the line
+  const pendingCmdRef = useRef(null);  // command entered but not yet confirmed success/fail
+  const pendingOutputRef = useRef(''); // PTY output accumulated since last Enter
+  const hostKeyErrRef = useRef(false); // "REMOTE HOST IDENTIFICATION HAS CHANGED" seen in output
+  // Watch PTY output for the ssh known_hosts mismatch error so we can offer
+  // a one-key fix (ssh-keygen -R) instead of making the user do it manually.
+  const detectHostKeyError = (data) => {
+    try {
+      const text = typeof data === 'string' ? data : new TextDecoder().decode(data);
+      if (/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/.test(text)) {
+        hostKeyErrRef.current = true;
+      }
+    } catch (_) {}
+  };
+  const [suggestions, setSuggestions] = useState([]); // autocomplete list
+  const [suggestionIdx, setSuggestionIdx] = useState(-1); // selected suggestion index
+  const suggestionsRef = useRef([]);    // mirror of suggestions for use inside onData closure
+  const suggestionsIdxRef = useRef(-1); // mirror of suggestionIdx for use inside onData closure
+  const [cursorRowsBelow, setCursorRowsBelow] = useState(24); // rows below cursor in viewport
   const [searchVisible, setSearchVisible] = useState(false);
+  const searchVisibleRef = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState(null); // { current, total } | null
   const searchInputRef = useRef(null);
@@ -77,12 +100,25 @@ export default function TerminalPane({
   // Keep refs in sync so PTY data closures always see current values
   isActiveRef.current = isActive;
   onActivityRef.current = onActivity;
+  searchVisibleRef.current = searchVisible;
 
   const updateStatus = useCallback((s) => {
     statusRef.current = s;
     setStatus(s);
     onStatusChange?.(s);
   }, [onStatusChange]);
+
+  // ── Network status ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const onOffline = () => setNetworkOffline(true);
+    const onOnline  = () => setNetworkOffline(false);
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online',  onOnline);
+    return () => {
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('online',  onOnline);
+    };
+  }, []);
 
   // ── Font size ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -110,6 +146,17 @@ export default function TerminalPane({
         setSearchVisible(true);
         setTimeout(() => searchInputRef.current?.select(), 30);
       }
+      else if ((e.key === 'c' || e.key === 'C') && e.metaKey && !e.ctrlKey) {
+        // Cmd+C: copy selection (don't interfere with Ctrl+C → PTY)
+        if (!isActiveRef.current) return;
+        const sel = termRef.current?.getSelection();
+        if (sel) {
+          e.preventDefault();
+          e.stopPropagation();
+          window.electronAPI?.clipboard.writeText(sel);
+          termRef.current?.clearSelection();
+        }
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -132,7 +179,8 @@ export default function TerminalPane({
       lineHeight: LINE_HEIGHT,
       theme: TERMINAL_THEME,
       cursorBlink: true,
-      cursorStyle: 'bar',
+      cursorStyle: 'block',  // block is more visible than bar
+      cursorWidth: 2,
       scrollback: 10000,
       macOptionIsMeta: true,
       macOptionClickForcesSelection: false,
@@ -146,15 +194,29 @@ export default function TerminalPane({
     term.loadAddon(fitAddon);
     term.loadAddon(searchAddon);
     term.loadAddon(new WebLinksAddon());
-    term.open(containerRef.current);
     searchAddonRef.current = searchAddon;
     termRef.current = term;
     fitAddonRef.current = fitAddon;
+    // NOTE: term.open() is deferred to the startObserver below. Restored
+    // background tabs mount inside display:none containers (0×0); opening
+    // xterm there makes the renderer measure bogus cell metrics, and the
+    // terminal ends up as a tiny region stuck in the top-left corner that
+    // no later fit() can repair.
 
-    // WebGL is loaded/unloaded by the isActive effect below so only the
-    // currently-visible tab holds a WebGL context. Browsers cap concurrent
-    // WebGL contexts at ~8; exceeding that causes "Too many active WebGL
-    // contexts" warnings and dimension errors in inactive terminals.
+    // Load WebGL once when the terminal opens; CSS display:none on inactive
+    // tab containers means the context is idle but alive — no dispose/reload
+    // thrash needed on tab switches.
+    const loadWebgl = () => {
+      try {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => {
+          try { webgl.dispose(); } catch (_) {}
+          webglAddonRef.current = null;
+        });
+        term.loadAddon(webgl);
+        webglAddonRef.current = webgl;
+      } catch (_) {}
+    };
 
     // ── Gutter sync ──
     // Read the actual cell height from xterm's internal renderer so the gutter
@@ -175,6 +237,14 @@ export default function TerminalPane({
     term.onScroll(syncGutter);
     term.onResize(syncGutter);
 
+    // Track rows below cursor so suggestion dropdown can be placed above the input line
+    const updateCursorRows = () => {
+      const buf = term.buffer.active;
+      setCursorRowsBelow(term.rows - 1 - buf.cursorY);
+    };
+    term.onCursorMove(updateCursorRows);
+    term.onResize(updateCursorRows);
+
     // Track timestamps: called after xterm processes each write
     const trackTimestamps = () => {
       const total = term.buffer.active.length;
@@ -186,9 +256,9 @@ export default function TerminalPane({
       syncGutter();
     };
 
-    // Select → copy (skip when search bar is open to avoid overwriting clipboard with match highlights)
+    // Select → copy (skip while search bar is open to avoid overwriting clipboard with match highlights)
     term.onSelectionChange(() => {
-      if (searchInputRef.current === document.activeElement) return;
+      if (searchVisibleRef.current) return;
       const sel = term.getSelection();
       if (sel && window.electronAPI) window.electronAPI.clipboard.writeText(sel);
     });
@@ -227,8 +297,8 @@ export default function TerminalPane({
         setTimeout(() => { isComposingRef.current = false; }, 50);
       }, true);
     };
-    if (term.textarea) setupImeHint();
-    else requestAnimationFrame(setupImeHint);
+    // setupImeHint is invoked after term.open() in the startObserver below —
+    // the textarea doesn't exist until the terminal is opened.
 
     // Right-click → paste + scroll to bottom
     const el = containerRef.current;
@@ -265,11 +335,18 @@ export default function TerminalPane({
       // Re-sync dimensions: fit() may have changed cols/rows between create() call and response
       window.electronAPI.terminal.resize(result.id, term.cols, term.rows);
       updateStatus('connected');
-      // Register sendCommand fn so CommandBar can write to this terminal
-      onReady?.((text) => {
-        if (terminalIdRef.current !== null)
-          window.electronAPI.terminal.write(terminalIdRef.current, text);
-      });
+      // NOTE: the CommandBar send-fn is registered in a dedicated mount effect
+      // (see below), NOT here — this async path only runs when the tab first
+      // becomes visible, and restored tabs could miss the registration.
+
+      // Match shell-level errors only (not application log content)
+      // These patterns appear at the START of a line in shell error output
+      // Match shell-level errors (not application log content).
+      // Must cover: bash/zsh "command not found", Ubuntu "Command 'x' not found",
+      // permission denied, and other shell errors. Use /i for case-insensitive match.
+      const FAIL_RE = /^[^\n]*(?:command not found|not found[,\s]|: No such file or directory|: Permission denied|: invalid option|: illegal option|: syntax error|: cannot access|: Operation not permitted)/im;
+      // Strip ANSI escape codes from PTY output for text analysis
+      const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[mABCDHfJKSTu]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').replace(/\x1b[()][AB012]/g, '');
 
       dataCleanupRef.current = window.electronAPI.terminal.onData(({ id, data }) => {
         if (id === result.id) {
@@ -277,6 +354,30 @@ export default function TerminalPane({
           term.write(data instanceof Uint8Array ? data : data, trackTimestamps);
           // Notify parent when new output arrives in a background tab
           if (!isActiveRef.current) onActivityRef.current?.();
+          detectHostKeyError(data);
+
+          // Pending command success/failure detection
+          if (pendingCmdRef.current) {
+            const text = typeof data === 'string' ? data : new TextDecoder().decode(data);
+            const clean = stripAnsi(text);
+            pendingOutputRef.current += clean;
+            // Cap buffer to last 2000 chars to avoid false positives from log output
+            if (pendingOutputRef.current.length > 2000) {
+              pendingOutputRef.current = pendingOutputRef.current.slice(-2000);
+            }
+            // Detect a new shell prompt — indicates command has finished
+            // Match lines ending with common prompt suffixes ($ # % >) after stripping colors
+            const lines = pendingOutputRef.current.split(/\r?\n/);
+            const lastLine = lines[lines.length - 1].trimEnd();
+            if (pendingOutputRef.current.includes('\n') && /[$#%>]\s*$/.test(lastLine)) {
+              const failed = FAIL_RE.test(pendingOutputRef.current);
+              if (!failed) {
+                window.electronAPI.history.add(pendingCmdRef.current);
+              }
+              pendingCmdRef.current = null;
+              pendingOutputRef.current = '';
+            }
+          }
         }
       });
 
@@ -307,7 +408,10 @@ export default function TerminalPane({
           term.write('\x1b[!p');
           term.writeln('');
           term.writeln(`\x1b[33m[Process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m`);
-          if (sessionConfig || quickConnect) {
+          if (hostKeyErrRef.current && (sessionConfig || quickConnect)) {
+            term.writeln('\x1b[33m[检测到远程主机密钥已变更（known_hosts 冲突）]\x1b[0m');
+            term.writeln('\x1b[2m[按 Y 清除本机旧密钥并重连；按 Enter 直接重连]\x1b[0m');
+          } else if (sessionConfig || quickConnect) {
             term.writeln('\x1b[2m[Press Enter to reconnect]\x1b[0m');
           }
         }
@@ -315,12 +419,117 @@ export default function TerminalPane({
 
       term.onData((data) => {
         if (isComposingRef.current) return;
+        // When suggestion dropdown is open, handle special keys
+        if (suggestionsRef.current.length > 0) {
+          const isArrow = data === '\x1b[A' || data === '\x1b[B';
+          if (isArrow) return; // keydown handler already navigated the list; don't send to PTY
+          if (data === '\r' && suggestionsIdxRef.current >= 0) { setSuggestions([]); return; }
+          if (data === '\r') setSuggestions([]);
+        }
         if (statusRef.current === 'disconnected') {
-          if (data === '\r' && reconnectRef.current) reconnectRef.current();
+          if ((data === 'y' || data === 'Y') && hostKeyErrRef.current && reconnectRef.current) {
+            hostKeyErrRef.current = false;
+            const qc = (quickConnect || '').trim().split(/\s+/)[0];
+            const host = sessionConfig?.host || (qc.includes('@') ? qc.split('@').pop() : qc);
+            const port = sessionConfig?.port;
+            term.writeln(`\x1b[36m[正在清除 ${host} 的旧主机密钥…]\x1b[0m`);
+            window.electronAPI.ssh?.removeHostKey(host, port).then((ok) => {
+              if (ok) {
+                term.writeln('\x1b[32m[旧密钥已清除，正在重连…]\x1b[0m');
+                reconnectRef.current?.();
+              } else {
+                term.writeln(`\x1b[31m[清除失败，请手动执行: ssh-keygen -R ${host}]\x1b[0m`);
+              }
+            });
+          } else if (data === '\r' && reconnectRef.current) {
+            hostKeyErrRef.current = false;
+            reconnectRef.current();
+          }
         } else if (terminalIdRef.current !== null) {
           window.electronAPI.terminal.write(terminalIdRef.current, data);
-          // Scroll to bottom on Enter so output is always visible
-          if (data === '\r') term.scrollToBottom();
+          if (data === '\r') {
+            term.scrollToBottom();
+            // Capture the keystroke tracker NOW — it's cleared synchronously
+            // below, and it's ahead of the xterm buffer by the SSH echo delay.
+            const typed = inputBufferRef.current.trim();
+            const shellModified = inputModifiedByShellRef.current;
+            inputModifiedByShellRef.current = false;
+
+            // Wait briefly for the remote echo, then read the buffer and
+            // reconcile with the tracker (same strategy as updateSuggestions):
+            // prefix relation → take the longer; divergence → trust the buffer.
+            const delayMs = shellModified ? 30 : 0;
+            setTimeout(() => {
+              let bufCmd = '';
+              try {
+                const buf = term.buffer.active;
+                // Walk back from cursorY to find start of the logical (possibly
+                // wrapped) line.
+                let endY = buf.cursorY;
+                let startY = endY;
+                while (startY > 0 && buf.getLine(buf.baseY + startY)?.isWrapped) {
+                  startY--;
+                }
+                let raw = '';
+                for (let y = startY; y <= endY; y++) {
+                  const line = buf.getLine(buf.baseY + y);
+                  if (!line) break;
+                  raw += line.translateToString(y === endY);
+                }
+                raw = raw.trimEnd();
+                const m = raw.match(/[#$%>]\s+(.+)$/);
+                bufCmd = (m ? m[1] : '').trim();
+              } catch (_) {}
+
+              let cmd;
+              if (bufCmd.startsWith(typed) || typed.startsWith(bufCmd)) {
+                cmd = typed.length >= bufCmd.length ? typed : bufCmd;
+              } else {
+                cmd = bufCmd || typed;
+              }
+
+              if (cmd) {
+                pendingCmdRef.current = { cmd, host: sessionConfig?.host || quickConnect || '' };
+                pendingOutputRef.current = '';
+              }
+            }, delayMs);
+
+            // Clear input tracking immediately
+            inputBufferRef.current = '';
+            setSuggestions([]);
+          } else if (data === '\x7f') {
+            // Backspace
+            inputBufferRef.current = inputBufferRef.current.slice(0, -1);
+            updateSuggestions(inputBufferRef.current);
+          } else if (data === '\x03' || data === '\x04' || data === '\x15') {
+            // Ctrl+C/D: save pending command immediately (user ran it intentionally)
+            if ((data === '\x03' || data === '\x04') && pendingCmdRef.current) {
+              window.electronAPI.history.add(pendingCmdRef.current);
+              pendingCmdRef.current = null;
+              pendingOutputRef.current = '';
+            }
+            inputBufferRef.current = '';
+            inputModifiedByShellRef.current = false;
+            setSuggestions([]);
+          } else if (data === '\x09') {
+            // TAB — shell will complete; xterm buffer needed on Enter
+            inputModifiedByShellRef.current = true;
+            setSuggestions([]);
+          } else if (data === '\x1b[A' || data === '\x1b[B' || data === '\x1b[C' || data === '\x1b[D') {
+            // Arrow keys — shell history recall or cursor move; xterm buffer on Enter
+            inputModifiedByShellRef.current = true;
+            setSuggestions([]);
+          } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+            inputBufferRef.current += data;
+            updateSuggestions(inputBufferRef.current);
+          } else if (data.length > 1 && !data.startsWith('\x1b')) {
+            // Paste — append printable chars to buffer (exclude escape sequences)
+            const printable = [...data].filter(c => c.charCodeAt(0) >= 32).join('');
+            if (printable) { inputBufferRef.current += printable; updateSuggestions(inputBufferRef.current); }
+          } else {
+            // Other escape sequences — pass through
+            setSuggestions([]);
+          }
         }
       });
 
@@ -330,17 +539,21 @@ export default function TerminalPane({
       });
     };
 
-    // Wait until the container has a real layout size before creating the PTY.
-    // requestAnimationFrame is not enough in Electron — use ResizeObserver so we
-    // only proceed once clientWidth > 0 (real layout dimensions are available).
-    // This prevents the PTY from being told 80 cols (xterm default) while the
-    // terminal container is actually wider.
+    // Wait until the container has a real layout size before opening xterm
+    // and creating the PTY. Restored background tabs sit in display:none
+    // containers (0×0) — opening xterm there makes the renderer measure bogus
+    // cell metrics that no later fit() can repair, and the PTY would be told
+    // wrong dimensions. The observer fires once the tab first becomes visible.
     let started = false;
     const startObserver = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? 0;
-      if (w > 0 && !started) {
+      const h = entries[0]?.contentRect.height ?? 0;
+      if (w > 0 && h > 0 && !started) {
         started = true;
         startObserver.disconnect();
+        term.open(containerRef.current);
+        loadWebgl();
+        setupImeHint();
         try { fitAddon.fit(); } catch (_) {}
         initTerminal();
       }
@@ -364,62 +577,86 @@ export default function TerminalPane({
     };
   }, []);
 
-  // Resize observer
+  // Register the CommandBar send-fn once at mount. The fn dereferences
+  // terminalIdRef at call time, so registering before the PTY exists is safe
+  // — and it can't be skipped by the deferred-open / async-create flow that
+  // restored tabs go through.
+  useEffect(() => {
+    onReady?.((text) => {
+      if (terminalIdRef.current !== null && window.electronAPI) {
+        window.electronAPI.terminal.write(terminalIdRef.current, text);
+        try { termRef.current?.focus(); } catch (_) {}
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Resize observer — handles container size changes (sidebar drag, split pane, etc.)
   useEffect(() => {
     if (!containerRef.current) return;
-    const observer = new ResizeObserver(() => {
-      try { fitAddonRef.current?.fit(); } catch (_) {}
+    const observer = new ResizeObserver((entries) => {
+      // Skip when container is hidden (display:none on parent collapses size to 0)
+      const w = entries[0]?.contentRect.width ?? 0;
+      const h = entries[0]?.contentRect.height ?? 0;
+      if (w > 0 && h > 0) {
+        try { fitAddonRef.current?.fit(); } catch (_) {}
+      }
     });
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
 
+  // Window resize handler — catches fullscreen toggle and window drag-resize.
+  // Inactive tabs have display:none so ResizeObserver never fires for them;
+  // we record that a resize happened and apply fit() the next time the tab
+  // becomes active.
+  useEffect(() => {
+    let pendingResize = false;
+    const onWindowResize = () => {
+      const el = containerRef.current;
+      if (!el) return;
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        // Tab is visible — fit immediately
+        try { fitAddonRef.current?.fit(); } catch (_) {}
+      } else {
+        // Tab is hidden — defer fit() until it becomes active
+        pendingResize = true;
+      }
+    };
+    window.addEventListener('resize', onWindowResize);
+    return () => window.removeEventListener('resize', onWindowResize);
+  }, []);
+
   useEffect(() => {
     if (isActive && termRef.current) {
-      setTimeout(() => {
-        termRef.current?.focus();
-        try { fitAddonRef.current?.fit(); } catch (_) {}
-      }, 50);
+      // Use double rAF so the browser paints the display:flex container
+      // before focus() is called — single rAF or setTimeout(50) can fire
+      // while the element is still being laid out after display:none removal.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (searchVisibleRef.current) return; // don't steal focus from search bar
+        // try/catch: term.open() is deferred until the tab is first visible,
+        // so focus() can race ahead of the textarea's creation.
+        try { termRef.current?.focus(); } catch (_) {}
+        // Only fit if the container has a real size (not hidden)
+        const el = containerRef.current;
+        if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+          try { fitAddonRef.current?.fit(); } catch (_) {}
+        }
+      }));
       // Reset lingering terminal modes (DECCKM, mouse tracking, focus tracking)
-      // so that scrolling with the mouse wheel doesn't send cursor-key escape
-      // sequences to the PTY when commands like tail/cat are running.
-      if (terminalIdRef.current !== null) {
-        window.electronAPI?.terminal.write(terminalIdRef.current, '\x1b[!p');
-      }
+      // by writing DECSTR directly to the xterm renderer — NOT to the PTY.
+      // Sending to the PTY would pass it as input to tail/cat which outputs it verbatim.
+      termRef.current?.write('\x1b[!p');
     }
   }, [isActive]);
 
-  // Load WebGL only for the active tab; dispose it for inactive tabs.
-  // This keeps concurrent WebGL contexts at 1, avoiding the browser's
-  // "Too many active WebGL contexts" limit that causes dimension crashes.
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-
-    if (isActive) {
-      if (!webglAddonRef.current) {
-        try {
-          const addon = new WebglAddon();
-          addon.onContextLoss(() => {
-            try { addon.dispose(); } catch (_) {}
-            webglAddonRef.current = null;
-          });
-          term.loadAddon(addon);
-          webglAddonRef.current = addon;
-        } catch (_) {}
-      }
-    } else {
-      if (webglAddonRef.current) {
-        try { webglAddonRef.current.dispose(); } catch (_) {}
-        webglAddonRef.current = null;
-      }
-    }
-  }, [isActive]);
+  // WebGL is loaded once at terminal init (above). No per-tab lifecycle needed.
 
   // Re-seat textarea focus when the Electron window regains focus so that
   // inputmode="none" takes effect and the Windows IME stays off.
   useEffect(() => {
     const unsub = window.electronAPI?.window?.onFocus?.(() => {
+      if (searchVisibleRef.current) return; // keep focus on search bar
       const ta = termRef.current?.textarea;
       if (!ta) return;
       ta.blur();
@@ -427,6 +664,123 @@ export default function TerminalPane({
     });
     return () => unsub?.();
   }, []);
+
+  // Keep suggestion refs in sync so onData closure can read them without stale capture
+  useEffect(() => { suggestionsRef.current = suggestions; }, [suggestions]);
+  useEffect(() => { suggestionsIdxRef.current = suggestionIdx; }, [suggestionIdx]);
+
+  // ── History autocomplete ─────────────────────────────────────────────────
+  // IMPORTANT: this is an SSH terminal — the character echo comes from the
+  // REMOTE shell over the network, so the xterm buffer lags behind keystrokes
+  // by a full round-trip (potentially hundreds of ms). No fixed delay can
+  // guarantee the buffer already contains the just-typed character. The
+  // keystroke tracker (inputBufferRef) is updated synchronously in onData, so
+  // its LAST character is always fresh — use it for the word-boundary check,
+  // and reconcile it with the buffer for the actual search text.
+  const suggestTimerRef = useRef(null);
+  const updateSuggestions = useCallback((input) => {
+    clearTimeout(suggestTimerRef.current);
+    // Don't show suggestions if search box is open
+    if (searchVisibleRef.current) {
+      setSuggestions([]);
+      return;
+    }
+    const typed = input || '';
+    // Trailing space = word boundary: pause matching until the next character.
+    // This check MUST use the synchronous tracker, not the (laggy) buffer.
+    if (!typed || typed.endsWith(' ')) {
+      setSuggestions([]);
+      return;
+    }
+    suggestTimerRef.current = setTimeout(async () => {
+      // Read the current command line from the xterm buffer (authoritative
+      // when TAB completion / shell history rewrote the line).
+      let bufText = '';
+      try {
+        const buf = termRef.current?.buffer.active;
+        if (buf) {
+          let endY = buf.cursorY;
+          let startY = endY;
+          while (startY > 0 && buf.getLine(buf.baseY + startY)?.isWrapped) {
+            startY--;
+          }
+          let raw = '';
+          for (let y = startY; y < endY; y++) {
+            const line = buf.getLine(buf.baseY + y);
+            if (!line) break;
+            raw += line.translateToString(false); // mid-wrap lines are full-width
+          }
+          // Slice the cursor's line up to cursorX so trailing spaces survive
+          // (translateToString's trimRight would strip them).
+          const cursorLine = buf.getLine(buf.baseY + endY);
+          if (cursorLine) {
+            raw += cursorLine.translateToString(false, 0, buf.cursorX);
+          }
+          const m = raw.match(/[#$%>]\s+(.+)$/);
+          bufText = m ? m[1] : '';
+        }
+      } catch (_) {}
+
+      // Reconcile tracker vs buffer: if one is a prefix of the other they
+      // describe the same line at different echo stages — take the longer
+      // (fresher) one. If they diverge, the tracker missed keys (IME, shell
+      // edits) — trust the buffer.
+      let searchInput;
+      if (bufText.startsWith(typed) || typed.startsWith(bufText)) {
+        searchInput = typed.length >= bufText.length ? typed : bufText;
+      } else {
+        searchInput = bufText || typed;
+      }
+
+      if (!searchInput.trim() || searchInput.length < 2 || searchInput.endsWith(' ')) {
+        setSuggestions([]);
+        return;
+      }
+      const results = await window.electronAPI?.history?.search(searchInput, 5);
+      setSuggestions(results || []);
+      setSuggestionIdx(-1);
+    }, 40);
+  }, []);
+
+  const applySuggestion = useCallback((cmd) => {
+    const id = terminalIdRef.current;
+    if (!id) return;
+    // Clear current input with Ctrl+U, then type the suggestion
+    window.electronAPI.terminal.write(id, '\x15' + cmd);
+    inputBufferRef.current = cmd;
+    setSuggestions([]);
+    termRef.current?.focus();
+  }, []);
+
+  // Handle Tab/Esc for autocomplete — must intercept before xterm gets them.
+  // Defined AFTER applySuggestion to avoid temporal dead zone.
+  useEffect(() => {
+    const handler = (e) => {
+      if (!isActiveRef.current) return;
+      if (searchVisibleRef.current) return;
+      if (suggestions.length > 0) {
+        if (e.key === 'Enter' && suggestionIdx >= 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          applySuggestion(suggestions[suggestionIdx].cmd);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          setSuggestions([]);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSuggestionIdx((i) => (i <= 0 ? suggestions.length - 1 : i - 1));
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setSuggestionIdx((i) => (i >= suggestions.length - 1 ? 0 : i + 1));
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          // Cursor movement — close suggestions, let key pass through to terminal
+          setSuggestions([]);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [suggestions, suggestionIdx, applySuggestion]);
 
   // ── Search ────────────────────────────────────────────────────────────────
   const doSearch = useCallback((query, direction = 'next') => {
@@ -447,6 +801,8 @@ export default function TerminalPane({
       ? addon.findNext(query, opts)
       : addon.findPrevious(query, opts);
     setSearchResult(found ? { found: true } : { found: false });
+    // findNext/findPrevious scrolls xterm which may steal focus; take it back.
+    requestAnimationFrame(() => searchInputRef.current?.focus());
   }, []);
 
   const closeSearch = useCallback(() => {
@@ -468,6 +824,8 @@ export default function TerminalPane({
   // ── Reconnect ─────────────────────────────────────────────────────────────
   const handleReconnect = useCallback(async () => {
     if (!window.electronAPI || !termRef.current) return;
+    pendingCmdRef.current = null;
+    pendingOutputRef.current = '';
     setExitInfo(null);
     updateStatus('connecting');
     termRef.current.writeln('');
@@ -486,6 +844,7 @@ export default function TerminalPane({
 
     terminalIdRef.current = result.id;
     updateStatus('connected');
+    termRef.current.scrollToBottom();
 
     if (dataCleanupRef.current) dataCleanupRef.current();
     if (exitCleanupRef.current) exitCleanupRef.current();
@@ -505,6 +864,7 @@ export default function TerminalPane({
       if (id === result.id) {
         termRef.current?.write(data, trackTimestamps);
         if (!isActiveRef.current) onActivityRef.current?.();
+        detectHostKeyError(data);
       }
     });
     const zmodemUnsub = window.electronAPI.terminal.onZmodem((msg) => {
@@ -524,7 +884,10 @@ export default function TerminalPane({
         termRef.current?.write('\x1b[!p');
         termRef.current?.writeln('');
         termRef.current?.writeln(`\x1b[33m[Process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m`);
-        if (sessionConfig || quickConnect) {
+        if (hostKeyErrRef.current && (sessionConfig || quickConnect)) {
+          termRef.current?.writeln('\x1b[33m[检测到远程主机密钥已变更（known_hosts 冲突）]\x1b[0m');
+          termRef.current?.writeln('\x1b[2m[按 Y 清除本机旧密钥并重连；按 Enter 直接重连]\x1b[0m');
+        } else if (sessionConfig || quickConnect) {
           termRef.current?.writeln('\x1b[2m[Press Enter to reconnect]\x1b[0m');
         }
       }
@@ -552,20 +915,22 @@ export default function TerminalPane({
         </div>
       )}
 
-      {/* Font size controls */}
-      <div
-        style={{ position: 'absolute', top: 4, right: 8, zIndex: 10, display: 'flex', alignItems: 'center', gap: 4, opacity: 0.4, transition: 'opacity 0.15s' }}
-        onMouseEnter={e => e.currentTarget.style.opacity = 1}
-        onMouseLeave={e => e.currentTarget.style.opacity = 0.4}
-      >
-        <button className="terminal-toolbar-btn" style={{ fontSize: 14, lineHeight: 1, padding: '0 5px' }} onClick={() => changeFontSize(Math.max(fontSize - 1, 8))} title="减小字体 (⌘-)">A-</button>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 24, textAlign: 'center' }}>{fontSize}</span>
-        <button className="terminal-toolbar-btn" style={{ fontSize: 14, lineHeight: 1, padding: '0 5px' }} onClick={() => changeFontSize(Math.min(fontSize + 1, 32))} title="增大字体 (⌘+)">A+</button>
-        <button className="terminal-toolbar-btn" style={{ fontSize: 10, padding: '0 5px' }} onClick={() => changeFontSize(14)} title="重置字体 (⌘0)">reset</button>
-      </div>
+      {/* Network offline warning */}
+      {networkOffline && status === 'connected' && (
+        <div style={{
+          flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8,
+          padding: '5px 12px', background: 'rgba(255,189,46,0.12)',
+          borderBottom: '1px solid rgba(255,189,46,0.35)',
+        }}>
+          <span style={{ fontSize: 12, color: '#ffbd2e' }}>
+            ⚠ 网络已断开，会话将在约 6 秒后自动检测并提示重连
+          </span>
+        </div>
+      )}
+
 
       {/* Gutter + Terminal row */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', position: 'relative' }} ref={termRowRef}>
 
         {/* ── Gutter ── */}
         <div style={{
@@ -661,12 +1026,69 @@ export default function TerminalPane({
         )}
 
         {/* ── xterm ── */}
-        <div
-          ref={containerRef}
-          className="terminal-pane"
-          style={{ flex: 1, overflow: 'hidden' }}
-          onClick={() => termRef.current?.focus()}
-        />
+        <div style={{ flex: 1, overflow: 'visible', position: 'relative' }}>
+          <div
+            ref={containerRef}
+            className="terminal-pane"
+            style={{ width: '100%', height: '100%' }}
+            onClick={() => termRef.current?.focus()}
+          />
+
+        </div>
+
+        {/* ── Autocomplete suggestions overlay — anchored to cursor row ── */}
+        {suggestions.length > 0 && (() => {
+          const term = termRef.current;
+          const cellH = cellHeightRef.current;
+          const rowsBelow = term ? (term.rows - 1 - term.buffer.active.cursorY) : 0;
+          // leave 1 row gap between dropdown bottom and cursor row
+          // Sit just above the input row: 1 row for the cursor line itself
+          // plus most of a row of breathing space (a full extra row reads as
+          // detached; half a row overlaps the glyphs' ascenders).
+          const bottomPx = (rowsBelow + 1) * cellH + Math.round(cellH * 0.8);
+          return (
+            <div
+              onMouseDown={(e) => e.preventDefault()}
+              onWheel={(e) => {
+                // Let scroll events pass through to terminal without scrolling the dropdown itself
+                e.preventDefault();
+                termRef.current?.scrollLines(e.deltaY > 0 ? 3 : -3);
+              }}
+              style={{
+                position: 'absolute',
+                bottom: bottomPx,
+                left: GUTTER_WIDTH, right: 0, zIndex: 30,
+                background: '#1a1d23', border: '1px solid #2e3440',
+                borderRadius: '4px 4px 0 0',
+                maxHeight: 160, overflowY: 'auto',
+                boxShadow: '0 -4px 16px rgba(0,0,0,0.5)',
+                // clip to the terminal area so it never goes above the top
+                clipPath: `inset(0 0 0 0)`,
+              }}
+            >
+              {suggestions.map((s, i) => (
+                <div
+                  key={i}
+                  style={{
+                    padding: '3px 10px', cursor: 'pointer', fontSize: 12,
+                    fontFamily: '"JetBrains Mono", monospace',
+                    background: i === suggestionIdx ? '#2a3040' : 'transparent',
+                    color: i === suggestionIdx ? '#4a9eff' : '#e8e8e8',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    borderBottom: '1px solid #1e2230',
+                  }}
+                  onMouseEnter={() => setSuggestionIdx(i)}
+                  onMouseLeave={() => setSuggestionIdx(-1)}
+                  onClick={() => applySuggestion(s.cmd)}
+                >
+                  {s.cmd}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
+        {/* ── History panel ── */}
       </div>
 
       {/* Search bar */}
@@ -683,7 +1105,9 @@ export default function TerminalPane({
               setSearchQuery(e.target.value);
               doSearch(e.target.value, 'next');
             }}
-            onKeyDown={handleSearchKeyDown}
+            onKeyDown={(e) => { e.stopPropagation(); handleSearchKeyDown(e); }}
+            onKeyUp={(e) => e.stopPropagation()}
+            onKeyPress={(e) => e.stopPropagation()}
             placeholder="搜索…"
             style={{
               flex: 1, maxWidth: 260, background: '#111', border: '1px solid #3a3a3a',

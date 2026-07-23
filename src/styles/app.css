@@ -493,11 +493,51 @@ html, body, #root {
   display: flex;
   align-items: flex-end;
   padding: 0 4px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
   flex-shrink: 0;
   -webkit-app-region: no-drag;
   padding-left: 78px; /* space for macOS traffic lights */
+}
+
+/* Scrollable tab strip — scrollbar hidden, navigate via ‹ › buttons */
+.tabbar-tabs {
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none; /* Firefox */
+}
+.tabbar-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* ‹ › tab navigation buttons (shown only when tabs overflow) */
+.tab-scroll-btn {
+  /* Match the tab row: tabs are 30px tall and bottom-aligned, so the button
+     uses the same height + flex-end to line up with the tab text baseline. */
+  height: 30px;
+  width: 24px;
+  padding: 0 0 2px;
+  background: var(--bg-hover);
+  border: none;
+  border-radius: 5px 5px 0 0;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, color 0.1s;
+}
+.tab-scroll-btn:hover {
+  background: var(--accent, #4a9eff);
+  color: #fff;
 }
 .platform-win32 .tabbar,
 .platform-linux .tabbar {
@@ -533,10 +573,6 @@ html, body, #root {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
-.tabbar::-webkit-scrollbar {
-  height: 2px;
-}
-
 .tab {
   display: flex;
   align-items: center;

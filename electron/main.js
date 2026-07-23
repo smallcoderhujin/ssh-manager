@@ -116,6 +116,29 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const terminals = new Map();
 let terminalIdCounter = 0;
 
+// True once the user has confirmed quitting — lets the close/quit sequence
+// proceed without re-prompting (Dock 退出, Cmd+Q and the red button all
+// funnel through the same confirmation).
+let quitConfirmed = false;
+
+// Ask for confirmation only when there are live sessions to lose.
+async function confirmQuit(parentWin) {
+  if (terminals.size === 0) return true;
+  const opts = {
+    type: 'question',
+    buttons: ['关闭', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '确认关闭',
+    message: '确定要关闭 SSH Manager 吗？',
+    detail: `当前有 ${terminals.size} 个活动的终端会话将被断开。`,
+  };
+  const { response } = parentWin && !parentWin.isDestroyed()
+    ? await dialog.showMessageBox(parentWin, opts)
+    : await dialog.showMessageBox(opts);
+  return response === 0;
+}
+
 function createWindow() {
   const winOptions = {
     width: 1280,
@@ -162,19 +185,13 @@ function createWindow() {
   });
 
   win.on('close', async (e) => {
+    if (quitConfirmed) return; // confirmed quit in progress — let the window close
     e.preventDefault();
-    const activeCount = terminals.size;
-    const { response } = await dialog.showMessageBox(win, {
-      type: 'question',
-      buttons: ['关闭', '取消'],
-      defaultId: 0,
-      cancelId: 1,
-      title: '确认关闭',
-      message: '确定要关闭 SSH Manager 吗？',
-      detail: activeCount > 0 ? `当前有 ${activeCount} 个活动的终端会话将被断开。` : '',
-    });
-    if (response === 0) {
-      win.destroy();
+    if (await confirmQuit(win)) {
+      quitConfirmed = true;
+      // Quit the whole app, not just the window — destroying only the window
+      // leaves the app alive in the Dock on macOS, forcing a second 退出.
+      app.quit();
     }
   });
 
@@ -202,6 +219,8 @@ function buildSshArgs(session) {
   args.push('-o', 'PasswordAuthentication=yes');
   args.push('-o', 'PreferredAuthentications=keyboard-interactive,password,publickey');
   args.push('-o', 'ConnectTimeout=10');
+  args.push('-o', 'ServerAliveInterval=3');
+  args.push('-o', 'ServerAliveCountMax=2');
 
   if (session.port && session.port !== 22 && session.port !== '22') {
     args.push('-p', String(session.port));
@@ -711,6 +730,85 @@ ipcMain.handle('commands:reorder', (event, commands) => {
   return true;
 });
 
+// IPC: command history (7-day retention)
+const HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function historyPrune() {
+  const cutoff = Date.now() - HISTORY_TTL_MS;
+  const entries = store.get('cmdHistory', []);
+  const pruned = entries.filter((e) => e.ts >= cutoff);
+  if (pruned.length !== entries.length) store.set('cmdHistory', pruned);
+}
+historyPrune(); // prune on startup
+
+ipcMain.handle('history:add', (event, { cmd, host }) => {
+  if (!cmd || !cmd.trim()) return;
+  historyPrune();
+  const entries = store.get('cmdHistory', []);
+  const trimmedCmd = cmd.trim();
+
+  // Dedup: remove exact duplicates. If the new command is a prefix of an existing
+  // command (and very close in length), skip saving the new command and keep the
+  // more complete one. Otherwise, remove older prefixes of the new command.
+  let skipSave = false;
+  const deduped = entries.filter((e) => {
+    if (e.cmd === trimmedCmd) return false; // exact duplicate — always remove old one
+    // If existing command starts with new command AND they're close in length,
+    // skip saving the new command (keep the more complete one)
+    if (e.cmd.startsWith(trimmedCmd) && e.cmd.length > trimmedCmd.length &&
+        e.cmd.length - trimmedCmd.length <= 10) {
+      skipSave = true;
+      return true; // keep the more complete existing command
+    }
+    // Remove if new command starts with old command (old is a prefix of new)
+    if (trimmedCmd.startsWith(e.cmd) && e.cmd.length < trimmedCmd.length &&
+        trimmedCmd.length - e.cmd.length <= 10) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!skipSave) {
+    deduped.push({ cmd: trimmedCmd, host: host || '', ts: Date.now() });
+  }
+  store.set('cmdHistory', deduped);
+});
+
+ipcMain.handle('history:search', (event, { query, limit = 50 }) => {
+  historyPrune();
+  const entries = store.get('cmdHistory', []);
+  const q = (query || '').toLowerCase();
+  const matched = q
+    ? entries.filter((e) => e.cmd.toLowerCase().startsWith(q)).reverse()
+    : [...entries].reverse();
+  return matched.slice(0, limit);
+});
+
+ipcMain.handle('history:getAll', () => {
+  historyPrune();
+  return [...store.get('cmdHistory', [])].reverse();
+});
+
+ipcMain.handle('history:delete', (event, cmd) => {
+  const entries = store.get('cmdHistory', []).filter((e) => e.cmd !== cmd);
+  store.set('cmdHistory', entries);
+});
+
+ipcMain.handle('history:clear', () => { store.set('cmdHistory', []); });
+
+// IPC: ssh:removeHostKey — clear a stale entry from ~/.ssh/known_hosts after
+// a "REMOTE HOST IDENTIFICATION HAS CHANGED" failure. ssh-keygen -R handles
+// hashed known_hosts entries too, which manual sed/grep would miss.
+ipcMain.handle('ssh:removeHostKey', (event, { host, port }) => {
+  return new Promise((resolve) => {
+    // Only allow hostname/IP characters — this string reaches a shell-out.
+    if (!host || !/^[A-Za-z0-9._:\-]+$/.test(String(host))) return resolve(false);
+    const target = port && Number(port) !== 22 ? `[${host}]:${port}` : String(host);
+    const { execFile } = require('child_process');
+    execFile('ssh-keygen', ['-R', target], (err) => resolve(!err));
+  });
+});
+
 // IPC: sessions:getAll
 ipcMain.handle('sessions:getAll', () => {
   return store.get('sessions', []);
@@ -852,6 +950,17 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+});
+
+// Dock 退出 / Cmd+Q enter here first; confirm once, then quit for real.
+app.on('before-quit', async (e) => {
+  if (quitConfirmed) return;
+  e.preventDefault();
+  const win = BrowserWindow.getAllWindows()[0];
+  if (await confirmQuit(win)) {
+    quitConfirmed = true;
+    app.quit();
+  }
 });
 
 app.on('window-all-closed', () => {

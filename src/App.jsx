@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar.jsx';
+import HistoryPanel from './components/HistoryPanel.jsx';
 import TabBar from './components/TabBar.jsx';
 import TerminalPane from './components/TerminalPane.jsx';
 import SessionDialog from './components/SessionDialog.jsx';
@@ -28,6 +29,7 @@ export default function App() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingSession, setEditingSession] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(240);
+  const [sidebarTab, setSidebarTab] = useState('sessions'); // 'sessions' or 'history'
   const isResizing = useRef(false);
   const resizeStartX = useRef(0);
   const resizeStartWidth = useRef(0);
@@ -171,7 +173,12 @@ export default function App() {
       quickConnect: tab.quickConnect,
       password: tab.password,
     });
-    setTabs((prev) => [...prev, newTab]);
+    setTabs((prev) => {
+      const idx = prev.findIndex((t) => t.id === tab.id);
+      const next = [...prev];
+      next.splice(idx === -1 ? next.length : idx + 1, 0, newTab);
+      return next;
+    });
     setActiveTabId(newTab.id);
   }, []);
 
@@ -419,18 +426,58 @@ export default function App() {
         />
 
         {/* Right sidebar */}
-        <div style={{ width: sidebarWidth, display: 'flex', overflow: 'hidden', flexShrink: 0 }}>
-          <Sidebar
-            sessions={sessions}
-            onConnect={handleConnectSession}
-            onAdd={handleAddSession}
-            onEdit={handleEditSession}
-            onDelete={handleDeleteSession}
-            onDuplicate={handleDuplicateSession}
-            onImport={handleImportSshConfig}
-            onExportSessions={handleExportSessions}
-            onImportSessions={handleImportSessions}
-          />
+        <div style={{ width: sidebarWidth, display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 }}>
+          {/* Sidebar tabs */}
+          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            <button
+              onClick={() => setSidebarTab('sessions')}
+              style={{
+                flex: 1, padding: '8px', border: 'none', background: sidebarTab === 'sessions' ? 'var(--bg-secondary)' : 'transparent',
+                borderBottom: sidebarTab === 'sessions' ? '2px solid var(--text-primary)' : 'none',
+                color: sidebarTab === 'sessions' ? 'var(--text-primary)' : 'var(--text-muted)',
+                cursor: 'pointer', fontSize: 12, fontWeight: 500,
+              }}
+            >
+              会话
+            </button>
+            <button
+              onClick={() => setSidebarTab('history')}
+              style={{
+                flex: 1, padding: '8px', border: 'none', background: sidebarTab === 'history' ? 'var(--bg-secondary)' : 'transparent',
+                borderBottom: sidebarTab === 'history' ? '2px solid var(--text-primary)' : 'none',
+                color: sidebarTab === 'history' ? 'var(--text-primary)' : 'var(--text-muted)',
+                cursor: 'pointer', fontSize: 12, fontWeight: 500,
+              }}
+            >
+              历史
+            </button>
+          </div>
+          {/* Sidebar content */}
+          <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            {sidebarTab === 'sessions' ? (
+              <Sidebar
+                sessions={sessions}
+                onConnect={handleConnectSession}
+                onAdd={handleAddSession}
+                onEdit={handleEditSession}
+                onDelete={handleDeleteSession}
+                onDuplicate={handleDuplicateSession}
+                onImport={handleImportSshConfig}
+                onExportSessions={handleExportSessions}
+                onImportSessions={handleImportSessions}
+              />
+            ) : (
+              <HistoryPanel
+                onUse={(cmd) => {
+                  if (activeTabId) {
+                    const sendFn = terminalSendRefs.current[activeTabId];
+                    if (sendFn) sendFn(cmd);
+                  }
+                }}
+                onClose={() => {}} // No-op since we're always showing history in the tab
+              />
+            )}
+          </div>
         </div>
       </div>
 

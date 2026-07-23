@@ -120,6 +120,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     reorder: (commands) => ipcRenderer.invoke('commands:reorder', commands),
   },
 
+  // Command history
+  history: {
+    add:     (entry) => ipcRenderer.invoke('history:add', entry),
+    search:  (query, limit) => ipcRenderer.invoke('history:search', { query, limit }),
+    getAll:  () => ipcRenderer.invoke('history:getAll'),
+    delete:  (cmd) => ipcRenderer.invoke('history:delete', cmd),
+    clear:   () => ipcRenderer.invoke('history:clear'),
+  },
+
+  // SSH utilities
+  ssh: {
+    removeHostKey: (host, port) => ipcRenderer.invoke('ssh:removeHostKey', { host, port }),
+  },
+
   // Show native popup menu
   showPopupMenu: () => ipcRenderer.send('menu:show-popup'),
 

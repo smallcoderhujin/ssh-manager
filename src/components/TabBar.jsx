@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 
 export default function TabBar({
   tabs, activeTabId, activityTabs, onSelect, onClose, onNew, onDuplicate, onReorder,
@@ -10,6 +10,30 @@ export default function TabBar({
   // Drag-to-reorder state
   const dragIndexRef = useRef(null);
   const [insertAt, setInsertAt] = useState(null); // index to insert before (0..tabs.length)
+
+  // Tab overflow: hide the scrollbar and navigate with ‹ › buttons instead
+  const tabsScrollRef = useRef(null);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const el = tabsScrollRef.current;
+    if (!el) return;
+    const check = () => setOverflowing(el.scrollWidth > el.clientWidth + 1);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tabs.length]);
+
+  // Keep the active tab visible when switching (⌘1-9, click, etc.)
+  useEffect(() => {
+    const el = tabsScrollRef.current?.querySelector('.tab.active');
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeTabId]);
+
+  const scrollTabs = (dir) => {
+    tabsScrollRef.current?.scrollBy({ left: dir * 240, behavior: 'smooth' });
+  };
 
   const handleDragStart = (e, index) => {
     dragIndexRef.current = index;
@@ -55,24 +79,32 @@ export default function TabBar({
       >
         ☰
       </button>
-      {tabs.map((tab, idx) => (
-        <Tab
-          key={tab.id}
-          tab={tab}
-          index={idx}
-          isActive={tab.id === activeTabId}
-          hasActivity={activityTabs?.has(tab.id) ?? false}
-          insertBefore={insertAt === idx}
-          insertAfter={insertAt === idx + 1 && idx === tabs.length - 1}
-          onSelect={() => onSelect(tab.id)}
-          onClose={(e) => { e.stopPropagation(); onClose(tab.id); }}
-          onDuplicate={() => onDuplicate(tab)}
-          onDragStart={(e) => handleDragStart(e, idx)}
-          onDragOver={(e) => handleDragOver(e, idx)}
-          onDrop={(e) => handleDrop(e, idx)}
-          onDragEnd={handleDragEnd}
-        />
-      ))}
+      {overflowing && (
+        <button className="tab-scroll-btn" onClick={() => scrollTabs(-1)} title="向左滚动标签">‹</button>
+      )}
+      <div className="tabbar-tabs" ref={tabsScrollRef}>
+        {tabs.map((tab, idx) => (
+          <Tab
+            key={tab.id}
+            tab={tab}
+            index={idx}
+            isActive={tab.id === activeTabId}
+            hasActivity={activityTabs?.has(tab.id) ?? false}
+            insertBefore={insertAt === idx}
+            insertAfter={insertAt === idx + 1 && idx === tabs.length - 1}
+            onSelect={() => onSelect(tab.id)}
+            onClose={(e) => { e.stopPropagation(); onClose(tab.id); }}
+            onDuplicate={() => onDuplicate(tab)}
+            onDragStart={(e) => handleDragStart(e, idx)}
+            onDragOver={(e) => handleDragOver(e, idx)}
+            onDrop={(e) => handleDrop(e, idx)}
+            onDragEnd={handleDragEnd}
+          />
+        ))}
+      </div>
+      {overflowing && (
+        <button className="tab-scroll-btn" onClick={() => scrollTabs(1)} title="向右滚动标签">›</button>
+      )}
       <button className="tab-add" onClick={() => onNew()} title="新建标签页 (⌘T)">+</button>
       <div className="tabbar-drag-spacer" />
       {isWin && api && (
